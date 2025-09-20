@@ -37,7 +37,7 @@ func (p *ChatLLMProcessor) GetConfig() core.TTSConfig {
 
 // Process takes text and returns the raw audio data by calling the chatllm binary.
 func (p *ChatLLMProcessor) Process(ctx context.Context, text []byte, cfg core.TTSConfig) ([]byte, error) {
-	tempFile, err := os.CreateTemp("", "tts-output-*.wav")
+	tempFile, err := os.CreateTemp("", "tts-output-*.pcm")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file for tts output: %w", err)
 	}

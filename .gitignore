@@ -55,7 +55,7 @@ yarn-debug.log*
 yarn-error.log*
 
 # Audio files
-*.wav
+*.pcm
 *.mp3
 *.ogg
 *.flac

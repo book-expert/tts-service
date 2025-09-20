@@ -185,12 +185,12 @@ func TestMessageHandler_Success(t *testing.T) {
 		PNGKey:            "",
 		PageNumber:        0,
 		TotalPages:        0,
-		Voice:             "",
+		Voice:             "tara",
 		Seed:              0,
 		NGL:               0,
-		TopP:              0,
-		RepetitionPenalty: 0,
-		Temperature:       0,
+		TopP:              0.95,
+		RepetitionPenalty: 1.1,
+		Temperature:       0.7,
 	}
 	eventData, err := json.Marshal(testEvent)
 	require.NoError(t, err)

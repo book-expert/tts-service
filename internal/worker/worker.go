@@ -143,7 +143,7 @@ func (w *NatsWorker) processTTSJob(ctx context.Context, event *events.TextProces
 		return "", fmt.Errorf("failed to process text to speech: %w", err)
 	}
 
-	audioKey := uuid.NewString() + ".wav"
+	audioKey := uuid.NewString() + ".pcm"
 
 	err = w.store.Upload(ctx, audioKey, audioData)
 	if err != nil {
@@ -198,8 +198,14 @@ func (w *NatsWorker) validateTTSConfig(cfg core.TTSConfig) error {
 	// Validate Voice (example with a simple whitelist)
 	allowedVoices := map[string]struct{}{
 		"default": {},
-		"male1":   {},
-		"female1": {},
+		"tara":    {},
+		"leah":    {},
+		"jess":    {},
+		"leo":     {},
+		"dan":     {},
+		"mia":     {},
+		"zac":     {},
+		"zoe":     {},
 	}
 
 	if cfg.Voice == "" {
