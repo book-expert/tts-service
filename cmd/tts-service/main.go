@@ -3,9 +3,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/book-expert/logger"
@@ -65,10 +67,52 @@ func setupNATS(cfg *config.Config) (*nats.Conn, jetstream, error) {
 	return natsConnection, jetstreamContext, nil
 }
 
+func ensureStreamForSubject(js jetstream, subject string) error {
+	streamName := streamNameForSubject(subject)
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:                 streamName,
+		Subjects:             []string{subject},
+		Retention:            nats.WorkQueuePolicy,
+		MaxConsumers:         -1,
+		MaxMsgs:              -1,
+		MaxBytes:             -1,
+		Discard:              nats.DiscardOld,
+		DiscardNewPerSubject: false,
+		MaxAge:               0,
+		MaxMsgsPerSubject:    -1,
+		MaxMsgSize:           -1,
+		Storage:              nats.FileStorage,
+		Replicas:             1,
+	})
+	if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+		return err
+	}
+
+	return nil
+}
+
+func streamNameForSubject(subject string) string {
+	replacer := strings.NewReplacer(
+		".", "_",
+		"*", "STAR",
+		">", "GT",
+	)
+
+	return strings.ToUpper(replacer.Replace(subject))
+}
+
 func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {
 	natsConnection, jetstreamContext, err := setupNATS(cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	streamErr := ensureStreamForSubject(jetstreamContext, cfg.NATS.AudioChunkCreatedSubject)
+	if streamErr != nil {
+		natsConnection.Close()
+
+		return nil, fmt.Errorf("failed to ensure audio chunk stream: %w", streamErr)
 	}
 
 	store, err := objectstore.New(jetstreamContext, cfg.NATS.AudioObjectStoreBucket)
