@@ -48,17 +48,27 @@ func bootstrap() (*config.Config, *logger.Logger, error) {
 	return cfg, bootstrapLog, nil
 }
 
-func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {
+//nolint:ireturn
+func setupNATS(cfg *config.Config) (*nats.Conn, jetstream, error) {
 	natsConnection, err := nats.Connect(cfg.NATS.URL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
+		return nil, nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
 	jetstreamContext, err := natsConnection.JetStream()
 	if err != nil {
 		natsConnection.Close()
 
-		return nil, fmt.Errorf("failed to get JetStream context: %w", err)
+		return nil, nil, fmt.Errorf("failed to get JetStream context: %w", err)
+	}
+
+	return natsConnection, jetstreamContext, nil
+}
+
+func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {
+	natsConnection, jetstreamContext, err := setupNATS(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	store, err := objectstore.New(jetstreamContext, cfg.NATS.AudioObjectStoreBucket)
@@ -77,6 +87,7 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 		TopP:              cfg.TTS.TopP,
 		RepetitionPenalty: cfg.TTS.RepetitionPenalty,
 		Temperature:       cfg.TTS.Temperature,
+		AllowedVoices:     cfg.TTS.AllowedVoices,
 	}, log)
 	if err != nil {
 		natsConnection.Close()
@@ -85,7 +96,13 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 	}
 
 	natsWorker, err := worker.NewNatsWorker(
-		natsConnection, jetstreamContext, cfg.NATS.TextProcessedSubject, store, processor, log,
+		natsConnection,
+		jetstreamContext,
+		cfg.NATS.TextProcessedSubject,
+		cfg.NATS.AudioChunkCreatedSubject,
+		store,
+		processor,
+		log,
 	)
 	if err != nil {
 		natsConnection.Close()

@@ -23,6 +23,7 @@ func TestNewChatLLMProcessor(t *testing.T) {
 		TopP:              0,
 		RepetitionPenalty: 0,
 		Temperature:       0,
+		AllowedVoices:     []string{"default"},
 	}
 	testLogger, err := logger.New("/tmp", "test-log.log")
 	require.NoError(t, err)
@@ -43,6 +44,7 @@ func TestChatLLMProcessor_Process(t *testing.T) {
 		TopP:              0,
 		RepetitionPenalty: 0,
 		Temperature:       0,
+		AllowedVoices:     []string{"default"},
 	}
 	testLogger, err := logger.New("/tmp", "test-log.log")
 	require.NoError(t, err)
@@ -61,6 +63,7 @@ func TestChatLLMProcessor_Process(t *testing.T) {
 		TopP:              0,
 		RepetitionPenalty: 0,
 		Temperature:       0,
+		AllowedVoices:     []string{"default"},
 	})
 	require.Error(t, err)
 }

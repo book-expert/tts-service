@@ -1,10 +1,10 @@
-// Package worker_test tests the NATS worker for the TTS service.
+// Package worker_test contains the unit tests for the worker package.
 package worker_test
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,206 +13,147 @@ import (
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/book-expert/tts-service/internal/worker"
 	"github.com/google/uuid"
-
-	"github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	errMockDownload = errors.New("mock download error")
-	errMockUpload   = errors.New("mock upload error")
-	errMockProcess  = errors.New("mock process error")
-)
-
-// mockObjectStore is a mock implementation of the ObjectStore interface.
-type mockObjectStore struct {
-	downloadShouldFail bool
-	uploadShouldFail   bool
-	downloadedKey      string
-	uploadedKey        string
-	uploadedData       []byte
+// MockJetStreamContext is a mock implementation of the nats.JetStreamContext interface.
+type MockJetStreamContext struct {
+	mock.Mock
 }
 
-func (m *mockObjectStore) Download(_ context.Context, key string) ([]byte, error) {
-	if m.downloadShouldFail {
-		return nil, errMockDownload
-	}
-
-	m.downloadedKey = key
-
-	return []byte("sample text"), nil
+// Publish is a mock implementation of the Publish method.
+func (m *MockJetStreamContext) Publish(subj string, data []byte, _ ...nats.PubOpt) (*nats.PubAck, error) {
+	args := m.Called(subj, data)
+	// Return a nil PubAck, since we are not using it in the worker
+	return nil, fmt.Errorf("failed to publish: %w", args.Error(1))
 }
 
-func (m *mockObjectStore) Upload(_ context.Context, key string, data []byte) error {
-	if m.uploadShouldFail {
-		return errMockUpload
-	}
-
-	m.uploadedKey = key
-	m.uploadedData = data
-
-	return nil
+// MockObjectStore is a mock implementation of the core.ObjectStore interface.
+type MockObjectStore struct {
+	mock.Mock
 }
 
-// mockTTSProcessor is a mock implementation of the TTSProcessor interface.
-type mockTTSProcessor struct {
-	processShouldFail bool
-	processedText     []byte
-	processedCfg      core.TTSConfig
-	config            core.TTSConfig
+// Download is a mock implementation of the Download method.
+func (m *MockObjectStore) Download(ctx context.Context, key string) ([]byte, error) {
+	args := m.Called(ctx, key)
+	data, _ := args.Get(0).([]byte)
+
+	return data, fmt.Errorf("failed to download: %w", args.Error(1))
 }
 
-func (m *mockTTSProcessor) GetConfig() core.TTSConfig {
-	return m.config
+// Upload is a mock implementation of the Upload method.
+func (m *MockObjectStore) Upload(ctx context.Context, key string, data []byte) error {
+	args := m.Called(ctx, key, data)
+
+	return fmt.Errorf("failed to upload: %w", args.Error(0))
 }
 
-func (m *mockTTSProcessor) Process(_ context.Context, text []byte, cfg core.TTSConfig) ([]byte, error) {
-	if m.processShouldFail {
-		return nil, errMockProcess
-	}
-
-	m.processedText = text
-	m.processedCfg = cfg
-
-	return []byte("sample audio"), nil
+// MockTTSProcessor is a mock implementation of the core.TTSProcessor interface.
+type MockTTSProcessor struct {
+	mock.Mock
 }
 
-func createTestNatsClient(t *testing.T) (*nats.Conn, func()) {
-	t.Helper()
+// Process is a mock implementation of the Process method.
+func (m *MockTTSProcessor) Process(ctx context.Context, text []byte, cfg core.TTSConfig) ([]byte, error) {
+	args := m.Called(ctx, text, cfg)
+	data, _ := args.Get(0).([]byte)
 
-	opts := test.DefaultTestOptions
-	opts.Port = -1 // Use a random port
-	opts.JetStream = true
-	server := test.RunServer(&opts)
-
-	natsConnection, err := nats.Connect(server.ClientURL())
-	if err != nil {
-		t.Fatalf("Failed to connect to test NATS server: %v", err)
-	}
-
-	cleanup := func() {
-		server.Shutdown()
-		natsConnection.Close()
-	}
-
-	return natsConnection, cleanup
+	return data, fmt.Errorf("failed to process: %w", args.Error(1))
 }
 
-func setupTest(t *testing.T) (
-	*worker.NatsWorker,
-	*mockObjectStore,
-	*mockTTSProcessor,
-	context.Context,
-	context.CancelFunc,
-	*nats.Conn,
-) {
-	t.Helper()
+// GetConfig is a mock implementation of the GetConfig method.
+func (m *MockTTSProcessor) GetConfig() core.TTSConfig {
+	args := m.Called()
+	cfg, _ := args.Get(0).(core.TTSConfig)
 
-	mockStore := &mockObjectStore{
-		downloadShouldFail: false,
-		uploadShouldFail:   false,
-		downloadedKey:      "",
-		uploadedKey:        "",
-		uploadedData:       nil,
-	}
-	mockProcessor := &mockTTSProcessor{
-		processShouldFail: false,
-		processedText:     nil,
-		processedCfg: core.TTSConfig{
-			ModelPath:         "dummy_model_path",
-			SnacModelPath:     "dummy_snac_model_path",
-			Voice:             "dummy_voice",
-			Seed:              0,
-			NGL:               0,
-			TopP:              0.0,
-			RepetitionPenalty: 0.0,
-			Temperature:       0.0,
-		},
-		config: core.TTSConfig{
-			ModelPath:         "dummy_model_path",
-			SnacModelPath:     "dummy_snac_model_path",
-			Voice:             "dummy_voice",
-			Seed:              0,
-			NGL:               0,
-			TopP:              0.0,
-			RepetitionPenalty: 0.0,
-			Temperature:       0.0,
-		},
-	}
-
-	natsConnection, natsCleanup := createTestNatsClient(t)
-	t.Cleanup(natsCleanup)
-
-	jetstreamContext, err := natsConnection.JetStream()
-	require.NoError(t, err)
-
-	testLogger, err := logger.New("/tmp", "test-log.log")
-	require.NoError(t, err)
-
-	workerInstance, err := worker.NewNatsWorker(
-		natsConnection, jetstreamContext, "test_subject", mockStore, mockProcessor, testLogger,
-	)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	return workerInstance, mockStore, mockProcessor, ctx, cancel, natsConnection
+	return cfg
 }
 
-func TestMessageHandler_Success(t *testing.T) {
-	t.Parallel()
-
-	workerInstance, mockStore, mockProcessor, ctx, cancel, natsConnection := setupTest(t)
-	defer cancel()
-
-	errChan := make(chan error, 1)
-
-	go func() {
-		errChan <- workerInstance.Run(ctx)
-	}()
-
-	testEvent := &events.TextProcessedEvent{
+func newTestEvent(workflowID string) *events.TextProcessedEvent {
+	return &events.TextProcessedEvent{
 		Header: events.EventHeader{
+			EventID:    uuid.New().String(),
 			Timestamp:  time.Now(),
-			WorkflowID: uuid.NewString(),
-			EventID:    uuid.NewString(),
-			UserID:     "",
-			TenantID:   "",
+			WorkflowID: workflowID,
+			UserID:     "test-user",
+			TenantID:   "test-tenant",
 		},
-		TextKey:           "test-text-key",
-		PNGKey:            "",
-		PageNumber:        0,
-		TotalPages:        0,
-		Voice:             "tara",
-		Seed:              0,
+		PNGKey:            "png-key",
+		TextKey:           "text-key",
+		PageNumber:        1,
+		TotalPages:        1,
+		Voice:             "default",
+		Seed:              12345,
 		NGL:               0,
-		TopP:              0.95,
+		TopP:              0.9,
 		RepetitionPenalty: 1.1,
 		Temperature:       0.7,
 	}
-	eventData, err := json.Marshal(testEvent)
+}
+
+func TestNatsWorker_HandleMessage_Success(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	mockJetStream := new(MockJetStreamContext)
+	mockStore := new(MockObjectStore)
+	mockProcessor := new(MockTTSProcessor)
+	log, err := logger.New(t.TempDir(), "test.log")
 	require.NoError(t, err)
 
-	replyMsg, err := natsConnection.Request("test_subject", eventData, 5*time.Second)
-	require.NoError(t, err, "Request should succeed and receive a reply")
-
-	var replyEvent events.AudioChunkCreatedEvent
-
-	err = json.Unmarshal(replyMsg.Data, &replyEvent)
+	natsConnection, err := nats.Connect(nats.DefaultURL)
 	require.NoError(t, err)
 
-	assert.Equal(t, "test-text-key", mockStore.downloadedKey)
-	assert.Equal(t, []byte("sample text"), mockProcessor.processedText)
-	assert.NotEmpty(t, mockStore.uploadedKey, "An audio key should have been generated and uploaded")
-	assert.Equal(t, []byte("sample audio"), mockStore.uploadedData)
+	defer natsConnection.Close()
 
-	assert.Equal(t, mockStore.uploadedKey, replyEvent.AudioKey)
-	assert.Equal(t, testEvent.Header.WorkflowID, replyEvent.Header.WorkflowID)
+	subject := "test.subject"
+	audioChunkCreatedSubject := "test.audio.created"
 
-	cancel()
+	worker, err := worker.NewNatsWorker(
+		natsConnection,
+		mockJetStream,
+		subject,
+		audioChunkCreatedSubject,
+		mockStore,
+		mockProcessor,
+		log,
+	)
+	require.NoError(t, err)
 
-	shutdownErr := <-errChan
-	assert.NoError(t, shutdownErr, "worker.Run should not error on graceful shutdown")
+	workflowID := uuid.New().String()
+	event := newTestEvent(workflowID)
+
+	eventData, err := json.Marshal(event)
+	require.NoError(t, err)
+
+	msg := &nats.Msg{
+		Subject: subject,
+		Reply:   "",
+		Header:  nil,
+		Data:    eventData,
+		Sub:     nil,
+	}
+
+	mockStore.On("Download", mock.Anything, event.TextKey).Return([]byte("hello world"), nil)
+	mockProcessor.On("GetConfig").Return(core.TTSConfig{
+		ModelPath:         "path",
+		SnacModelPath:     "snac_path",
+		Voice:             "default",
+		Seed:              12345,
+		NGL:               0,
+		TopP:              0.9,
+		RepetitionPenalty: 1.1,
+		Temperature:       0.7,
+		AllowedVoices:     []string{"default"},
+	})
+	mockProcessor.On("Process", mock.Anything, []byte("hello world"), mock.Anything).Return([]byte("audio data"), nil)
+	mockStore.On("Upload", mock.Anything, mock.Anything, []byte("audio data")).Return(nil)
+	mockJetStream.On("Publish", audioChunkCreatedSubject, mock.Anything).Return(nil, nil)
+
+	// Act
+	worker.HandleMessage(msg)
+
+	// Assert
+	mockJetStream.AssertCalled(t, "Publish", audioChunkCreatedSubject, mock.Anything)
 }

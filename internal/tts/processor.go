@@ -61,7 +61,7 @@ func (p *ChatLLMProcessor) Process(ctx context.Context, text []byte, cfg core.TT
 		"--temp", fmt.Sprintf("%.2f", cfg.Temperature),
 	}
 
-	// #nosec G204 -- arguments are validated via core.TTSConfig validation
+	// #nosec G204
 	cmd := exec.CommandContext(ctx, "chatllm", args...)
 
 	output, err := cmd.CombinedOutput()

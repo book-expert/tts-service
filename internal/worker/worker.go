@@ -38,36 +38,39 @@ var (
 
 // NatsWorker listens for TTS jobs on a NATS subject and processes them.
 type NatsWorker struct {
-	natsConnection   *nats.Conn
-	jetstreamContext nats.JetStreamContext
-	subject          string
-	store            core.ObjectStore
-	processor        core.TTSProcessor
-	log              *logger.Logger
+	natsConnection           *nats.Conn
+	jetstreamContext         JetStreamContext
+	subject                  string
+	audioChunkCreatedSubject string
+	store                    core.ObjectStore
+	processor                core.TTSProcessor
+	log                      *logger.Logger
 }
 
 // NewNatsWorker creates a new instance of a NATS worker.
 func NewNatsWorker(
 	natsConnection *nats.Conn,
-	jetstreamContext nats.JetStreamContext,
+	jetstreamContext JetStreamContext,
 	subject string,
+	audioChunkCreatedSubject string,
 	store core.ObjectStore,
 	processor core.TTSProcessor,
 	log *logger.Logger,
 ) (*NatsWorker, error) {
 	return &NatsWorker{
-		natsConnection:   natsConnection,
-		jetstreamContext: jetstreamContext,
-		subject:          subject,
-		store:            store,
-		processor:        processor,
-		log:              log,
+		natsConnection:           natsConnection,
+		jetstreamContext:         jetstreamContext,
+		subject:                  subject,
+		audioChunkCreatedSubject: audioChunkCreatedSubject,
+		store:                    store,
+		processor:                processor,
+		log:                      log,
 	}, nil
 }
 
 // Run starts the worker and begins listening for messages.
 func (w *NatsWorker) Run(ctx context.Context) error {
-	sub, err := w.natsConnection.Subscribe(w.subject, w.handleMessage)
+	sub, err := w.natsConnection.Subscribe(w.subject, w.HandleMessage)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to subject %s: %w", w.subject, err)
 	}
@@ -82,7 +85,8 @@ func (w *NatsWorker) Run(ctx context.Context) error {
 	return nil
 }
 
-func (w *NatsWorker) handleMessage(msg *nats.Msg) {
+// HandleMessage processes incoming NATS messages.
+func (w *NatsWorker) HandleMessage(msg *nats.Msg) {
 	ctx, cancel := context.WithTimeout(context.Background(), handleMessageTimeout)
 	defer cancel()
 
@@ -107,7 +111,7 @@ func (w *NatsWorker) handleMessage(msg *nats.Msg) {
 		TotalPages: event.TotalPages,
 	}
 
-	err = w.publishReplyEvent(msg, replyEvent)
+	err = w.publishEvent(replyEvent)
 	if err != nil {
 		w.log.Error("Failed to publish reply event for workflow %s: %v", event.Header.WorkflowID, err)
 	}
@@ -129,6 +133,7 @@ func (w *NatsWorker) processTTSJob(ctx context.Context, event *events.TextProces
 		TopP:              event.TopP,
 		RepetitionPenalty: event.RepetitionPenalty,
 		Temperature:       event.Temperature,
+		AllowedVoices:     w.processor.GetConfig().AllowedVoices,
 	}
 
 	validationErr := w.validateTTSConfig(ttsCfg)
@@ -153,14 +158,14 @@ func (w *NatsWorker) processTTSJob(ctx context.Context, event *events.TextProces
 	return audioKey, nil
 }
 
-// publishReplyEvent marshals and responds with the AudioChunkCreatedEvent.
-func (w *NatsWorker) publishReplyEvent(msg *nats.Msg, replyEvent *events.AudioChunkCreatedEvent) error {
+// publishEvent marshals and publishes the AudioChunkCreatedEvent.
+func (w *NatsWorker) publishEvent(replyEvent *events.AudioChunkCreatedEvent) error {
 	replyData, err := json.Marshal(replyEvent)
 	if err != nil {
 		return fmt.Errorf("failed to marshal reply event: %w", err)
 	}
 
-	err = msg.Respond(replyData)
+	_, err = w.jetstreamContext.Publish(w.audioChunkCreatedSubject, replyData)
 	if err != nil {
 		return fmt.Errorf("failed to publish reply event: %w", err)
 	}
@@ -181,31 +186,42 @@ func (w *NatsWorker) parseAndValidateEvent(msg *nats.Msg) (*events.TextProcessed
 
 // validateTTSConfig ensures that the TTSConfig contains valid and safe values.
 func (w *NatsWorker) validateTTSConfig(cfg core.TTSConfig) error {
-	// Validate ModelPath
+	var err error
+
+	err = validatePaths(cfg)
+	if err != nil {
+		return err
+	}
+
+	err = validateVoice(cfg)
+	if err != nil {
+		return err
+	}
+
+	err = validateNumericParams(cfg)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validatePaths(cfg core.TTSConfig) error {
 	if cfg.ModelPath == "" {
 		return ErrModelPathEmpty
 	}
-	// For simplicity, assuming ModelPath is always absolute and trusted for now.
-	// In a real-world scenario, more robust path validation (e.g., against whitelists,
-	// checking for directory traversal) would be needed.
 
-	// Validate SnacModelPath
 	if cfg.SnacModelPath == "" {
 		return ErrSnacModelPathEmpty
 	}
-	// Similar to ModelPath, assuming trusted for now.
 
-	// Validate Voice (example with a simple whitelist)
-	allowedVoices := map[string]struct{}{
-		"default": {},
-		"tara":    {},
-		"leah":    {},
-		"jess":    {},
-		"leo":     {},
-		"dan":     {},
-		"mia":     {},
-		"zac":     {},
-		"zoe":     {},
+	return nil
+}
+
+func validateVoice(cfg core.TTSConfig) error {
+	allowedVoices := make(map[string]struct{}, len(cfg.AllowedVoices))
+	for _, voice := range cfg.AllowedVoices {
+		allowedVoices[voice] = struct{}{}
 	}
 
 	if cfg.Voice == "" {
@@ -216,23 +232,25 @@ func (w *NatsWorker) validateTTSConfig(cfg core.TTSConfig) error {
 		return fmt.Errorf("%w: '%s'", ErrUnsupportedVoice, cfg.Voice)
 	}
 
-	// Validate numeric parameters
+	return nil
+}
+
+func validateNumericParams(cfg core.TTSConfig) error {
 	if cfg.TopP < 0.0 || cfg.TopP > 1.0 {
 		return fmt.Errorf("%w: got %f", ErrTopPRange, cfg.TopP)
 	}
-	// chatllm --help says 1.0=no penalty, so >= 1.0 is valid
+
 	if cfg.RepetitionPenalty < 1.0 {
 		return fmt.Errorf("%w: got %f", ErrRepetitionPenaltyRange, cfg.RepetitionPenalty)
 	}
-	// chatllm --help says T for --temp, typically >= 0.0
+
 	if cfg.Temperature < 0.0 {
 		return fmt.Errorf("%w: got %f", ErrTemperatureRange, cfg.Temperature)
 	}
-	// NGL (number of GPU layers) must be non-negative
+
 	if cfg.NGL < 0 {
 		return fmt.Errorf("%w: got %d", ErrNGLNegative, cfg.NGL)
 	}
-	// Seed is typically just an int, no specific range usually enforced beyond non-negative if desired.
 
 	return nil
 }

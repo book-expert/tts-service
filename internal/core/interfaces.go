@@ -20,6 +20,7 @@ type TTSConfig struct {
 	TopP              float64
 	RepetitionPenalty float64
 	Temperature       float64
+	AllowedVoices     []string
 }
 
 // TTSProcessor defines the interface for a text-to-speech processing engine.
