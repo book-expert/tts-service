@@ -1,56 +1,57 @@
-# TTS Microservice Project Makefile
+# Makefile for the tts-service component providing build, lint, and test workflows.
+GO_PACKAGES := ./...
+SERVICE_NAME := tts-service
+SERVICE_ENTRYPOINT := ./cmd/tts-service
+BINARY_DIRECTORY := $(HOME)/bin
+BINARY_PATH := $(BINARY_DIRECTORY)/$(SERVICE_NAME)
 
-.PHONY: all build test lint clean fmt help
+.PHONY: build test test-cover test-race clean fmt vet lint run install help
 
-# Build configuration
-SERVICE_BINARY := tts-service
-BUILD_DIR := bin
-
-# Go build flags
-LDFLAGS := -w -s
-BUILD_FLAGS := -ldflags="$(LDFLAGS)"
-
-# Default target
-all: build
-
-# Build the service
 build:
-	@echo "Building $(SERVICE_BINARY)..."
-	@mkdir -p $(BUILD_DIR)
-	go build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(SERVICE_BINARY) ./cmd/tts-service
+	mkdir -p $(BINARY_DIRECTORY)
+	go build -o $(BINARY_PATH) $(SERVICE_ENTRYPOINT)
 
-# Clean build artifacts
-clean:
-	@echo "Cleaning build artifacts..."
-	rm -rf $(BUILD_DIR)
-
-# Run Go tests
 test:
-	@echo "Running Go tests..."
-	go test -v ./...
+	go test -v $(GO_PACKAGES)
 
-# Run linter on Go code
-lint:
-	@echo "Running linter and formatter..."
-	@gofmt -w -s .
-	@go vet ./...
-	@golangci-lint run --fix ./...
-	@echo "Cleaning caches..."
-	@golangci-lint cache clean
-	@go clean -cache
+test-cover:
+	go test -coverprofile=coverage.out $(GO_PACKAGES)
+	go tool cover -html=coverage.out
 
-# Format Go code
+test-race:
+	go test -race $(GO_PACKAGES)
+
+clean:
+	rm -f $(BINARY_PATH)
+	rm -f coverage.out
+
 fmt:
-	@echo "Formatting Go code..."
-	gofmt -w -s .
+	gofmt -s -w .
 
-# Show help
+vet:
+	go vet $(GO_PACKAGES)
+
+lint:
+	golangci-lint run --fix ./...
+	golangci-lint cache clean
+	go clean -r -cache
+
+run:
+	go run $(SERVICE_ENTRYPOINT)
+
+install:
+	go mod tidy
+
 help:
 	@echo "Available targets:"
-	@echo "  all           - Build the service"
-	@echo "  build         - Build the Go TTS service"
-	@echo "  test          - Run Go tests"
-	@echo "  lint          - Run linter on Go code"
-	@echo "  clean         - Clean build artifacts"
-	@echo "  fmt           - Format Go code"
-	@echo "  help          - Show this help"
+	@echo "  build        - Build the application binary into $(BINARY_DIRECTORY)"
+	@echo "  test         - Run unit tests"
+	@echo "  test-cover   - Run unit tests with coverage"
+	@echo "  test-race    - Run unit tests with the race detector"
+	@echo "  clean        - Remove generated binaries and coverage artifacts"
+	@echo "  fmt          - Format Go source files"
+	@echo "  vet          - Run go vet on the module"
+	@echo "  lint         - Run golangci-lint and clean caches"
+	@echo "  run          - Run the application"
+	@echo "  install      - Synchronize module dependencies"
+	@echo "  help         - Show this help message"

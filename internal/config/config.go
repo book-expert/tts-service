@@ -9,12 +9,13 @@ import (
 
 // NATSConfig holds the configuration for NATS.
 type NATSConfig struct {
-	URL                      string `toml:"url"`
-	TTStreamName             string `toml:"tts_stream_name"`
-	TTSConsumerName          string `toml:"tts_consumer_name"`
-	TextProcessedSubject     string `toml:"text_processed_subject"`
-	AudioChunkCreatedSubject string `toml:"audio_chunk_created_subject"`
-	AudioObjectStoreBucket   string `toml:"audio_object_store_bucket"`
+    URL                      string `toml:"url"`
+    TTStreamName             string `toml:"tts_stream_name"`
+    TTSConsumerName          string `toml:"tts_consumer_name"`
+    TextProcessedSubject     string `toml:"text_processed_subject"`
+    AudioChunkCreatedSubject string `toml:"audio_chunk_created_subject"`
+    AudioObjectStoreBucket   string `toml:"audio_object_store_bucket"`
+    AudioProcessingStreamName string `toml:"audio_processing_stream_name"`
 }
 
 // TTSServiceConfig holds the specific configuration for the TTS service.

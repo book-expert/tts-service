@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
+	"time"
 
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/config"
@@ -50,78 +50,78 @@ func bootstrap() (*config.Config, *logger.Logger, error) {
 	return cfg, bootstrapLog, nil
 }
 
-//nolint:ireturn
-func setupNATS(cfg *config.Config) (*nats.Conn, jetstream, error) {
-	natsConnection, err := nats.Connect(cfg.NATS.URL)
+const (
+	natsConnectTimeout = 30 * time.Second
+	natsStreamTimeout  = 60 * time.Second
+)
+
+func setupNATS(cfg *config.Config) (*nats.Conn, error) {
+	natsConnection, err := nats.Connect(cfg.NATS.URL,
+		nats.Timeout(natsConnectTimeout),
+		nats.RetryOnFailedConnect(true))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to connect to NATS: %w", err)
+		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
-	jetstreamContext, err := natsConnection.JetStream()
-	if err != nil {
-		natsConnection.Close()
-
-		return nil, nil, fmt.Errorf("failed to get JetStream context: %w", err)
-	}
-
-	return natsConnection, jetstreamContext, nil
+	return natsConnection, nil
 }
 
-func ensureStreamForSubject(js jetstream, subject string) error {
-	streamName := streamNameForSubject(subject)
+// streamAdmin defines the minimal capability needed to manage streams.
+// Using a narrow interface here makes the function easy to unit test.
+type streamAdmin interface {
+	AddStream(cfg *nats.StreamConfig, opts ...nats.JSOpt) (*nats.StreamInfo, error)
+}
 
-	_, err := js.AddStream(&nats.StreamConfig{
-		Name:                 streamName,
-		Subjects:             []string{subject},
-		Retention:            nats.WorkQueuePolicy,
-		MaxConsumers:         -1,
-		MaxMsgs:              -1,
-		MaxBytes:             -1,
-		Discard:              nats.DiscardOld,
-		DiscardNewPerSubject: false,
-		MaxAge:               0,
-		MaxMsgsPerSubject:    -1,
-		MaxMsgSize:           -1,
-		Storage:              nats.FileStorage,
-		Replicas:             1,
-	})
+func ensureStreamForSubject(jetstreamContext streamAdmin, streamName, subject string) error {
+	streamCfg := &nats.StreamConfig{
+		Name:                   streamName,
+		Subjects:               []string{subject},
+		Retention:              nats.WorkQueuePolicy,
+		Description:            "",
+		MaxConsumers:           -1,
+		MaxMsgs:                -1,
+		MaxBytes:               -1,
+		Discard:                nats.DiscardOld,
+		DiscardNewPerSubject:   false,
+		MaxAge:                 0,
+		MaxMsgsPerSubject:      -1,
+		MaxMsgSize:             -1,
+		Storage:                nats.FileStorage,
+		Replicas:               1,
+		NoAck:                  false,
+		Duplicates:             0,
+		Placement:              nil,
+		Mirror:                 nil,
+		Sources:                nil,
+		Sealed:                 false,
+		DenyDelete:             false,
+		DenyPurge:              false,
+		AllowRollup:            false,
+		Compression:            nats.NoCompression,
+		FirstSeq:               0,
+		SubjectTransform:       nil,
+		RePublish:              nil,
+		AllowDirect:            false,
+		MirrorDirect:           false,
+		ConsumerLimits:         nats.StreamConsumerLimits{InactiveThreshold: 0, MaxAckPending: 0},
+		Metadata:               nil,
+		Template:               "",
+		AllowMsgTTL:            false,
+		SubjectDeleteMarkerTTL: 0,
+	}
+
+	// Bound the server-side request latency for creating the stream.
+	_, err := jetstreamContext.AddStream(streamCfg, nats.MaxWait(natsStreamTimeout))
 	if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
-		return err
+		return fmt.Errorf("failed to add stream '%s' for subject '%s': %w", streamName, subject, err)
 	}
 
 	return nil
 }
 
-func streamNameForSubject(subject string) string {
-	replacer := strings.NewReplacer(
-		".", "_",
-		"*", "STAR",
-		">", "GT",
-	)
+// streamNameForSubject removed; explicit stream names come from configuration.
 
-	return strings.ToUpper(replacer.Replace(subject))
-}
-
-func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {
-	natsConnection, jetstreamContext, err := setupNATS(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	streamErr := ensureStreamForSubject(jetstreamContext, cfg.NATS.AudioChunkCreatedSubject)
-	if streamErr != nil {
-		natsConnection.Close()
-
-		return nil, fmt.Errorf("failed to ensure audio chunk stream: %w", streamErr)
-	}
-
-	store, err := objectstore.New(jetstreamContext, cfg.NATS.AudioObjectStoreBucket)
-	if err != nil {
-		natsConnection.Close()
-
-		return nil, fmt.Errorf("failed to create object store: %w", err)
-	}
-
+func createTTSProcessor(cfg *config.Config, log *logger.Logger) (*tts.ChatLLMProcessor, error) {
 	processor, err := tts.New(core.TTSConfig{
 		ModelPath:         cfg.TTS.ModelPath,
 		SnacModelPath:     cfg.TTS.SnacModelPath,
@@ -134,12 +134,62 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 		AllowedVoices:     cfg.TTS.AllowedVoices,
 	}, log)
 	if err != nil {
-		natsConnection.Close()
-
 		return nil, fmt.Errorf("failed to create TTS processor: %w", err)
 	}
 
-	natsWorker, err := worker.NewNatsWorker(
+	return processor, nil
+}
+
+func verifyJetStreamAvailable(jetstreamContext nats.JetStreamContext) error {
+	_, jsInfoErr := jetstreamContext.AccountInfo(nats.MaxWait(natsStreamTimeout))
+	if jsInfoErr != nil {
+		return fmt.Errorf("jetstream not available or unresponsive: %w", jsInfoErr)
+	}
+
+	return nil
+}
+
+func ensureAudioProcessingStream(jetstreamContext streamAdmin, cfg *config.Config) error {
+	streamErr := ensureStreamForSubject(
+		jetstreamContext,
+		cfg.NATS.AudioProcessingStreamName,
+		cfg.NATS.AudioChunkCreatedSubject,
+	)
+	if streamErr != nil {
+		return fmt.Errorf("failed to ensure audio chunk stream: %w", streamErr)
+	}
+
+	return nil
+}
+
+func initStoresAndProcessor(
+    jetstreamContext nats.JetStreamContext,
+    cfg *config.Config,
+    log *logger.Logger,
+) (*objectstore.NatsObjectStore, *tts.ChatLLMProcessor, error) {
+	store, storeErr := objectstore.New(jetstreamContext, cfg.NATS.AudioObjectStoreBucket)
+	if storeErr != nil {
+		return nil, nil, fmt.Errorf("failed to create object store: %w", storeErr)
+	}
+
+	processor, procErr := createTTSProcessor(cfg, log)
+	if procErr != nil {
+		return nil, nil, procErr
+	}
+
+    return store, processor, nil
+}
+
+func launchWorker(
+	ctx context.Context,
+	natsConnection *nats.Conn,
+	jetstreamContext nats.JetStreamContext,
+	cfg *config.Config,
+	store core.ObjectStore,
+	processor core.TTSProcessor,
+	log *logger.Logger,
+) (context.CancelFunc, error) {
+	natsWorker, workerErr := worker.NewNatsWorker(
 		natsConnection,
 		jetstreamContext,
 		cfg.NATS.TextProcessedSubject,
@@ -148,10 +198,8 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 		processor,
 		log,
 	)
-	if err != nil {
-		natsConnection.Close()
-
-		return nil, fmt.Errorf("failed to create NATS worker: %w", err)
+	if workerErr != nil {
+		return nil, fmt.Errorf("failed to create NATS worker: %w", workerErr)
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
@@ -162,11 +210,55 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 		runErr := natsWorker.Run(workerCtx)
 		if runErr != nil {
 			log.Error("NATS worker stopped with error: %v", runErr)
-			workerCancel() // Ensure other dependent goroutines are stopped
+			workerCancel()
 		}
 	}()
 
 	log.System("TTS-Service successfully initialized. Listening for jobs on subject: %s", cfg.NATS.TextProcessedSubject)
+
+	return workerCancel, nil
+}
+
+func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {
+	natsConnection, err := setupNATS(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	jetstreamContext, jsErr := natsConnection.JetStream()
+	if jsErr != nil {
+		natsConnection.Close()
+
+		return nil, fmt.Errorf("failed to get JetStream context: %w", jsErr)
+	}
+
+	verifyErr := verifyJetStreamAvailable(jetstreamContext)
+	if verifyErr != nil {
+		natsConnection.Close()
+
+		return nil, verifyErr
+	}
+
+	ensureStreamErr := ensureAudioProcessingStream(jetstreamContext, cfg)
+	if ensureStreamErr != nil {
+		natsConnection.Close()
+
+		return nil, ensureStreamErr
+	}
+
+    store, processor, initErr := initStoresAndProcessor(jetstreamContext, cfg, log)
+	if initErr != nil {
+		natsConnection.Close()
+
+		return nil, initErr
+	}
+
+	workerCancel, launchErr := launchWorker(ctx, natsConnection, jetstreamContext, cfg, store, processor, log)
+	if launchErr != nil {
+		natsConnection.Close()
+
+		return nil, launchErr
+	}
 
 	return workerCancel, nil
 }

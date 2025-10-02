@@ -26,8 +26,22 @@ type MockJetStreamContext struct {
 // Publish is a mock implementation of the Publish method.
 func (m *MockJetStreamContext) Publish(subj string, data []byte, _ ...nats.PubOpt) (*nats.PubAck, error) {
 	args := m.Called(subj, data)
-	// Return a nil PubAck, since we are not using it in the worker
-	return nil, fmt.Errorf("failed to publish: %w", args.Error(1))
+
+	var pubAck *nats.PubAck
+
+	ackValue := args.Get(0)
+	if ackValue != nil {
+		if convertedAck, ok := ackValue.(*nats.PubAck); ok {
+			pubAck = convertedAck
+		}
+	}
+
+	returnedErr := args.Error(1)
+	if returnedErr != nil {
+		return pubAck, fmt.Errorf("mock publish returned error: %w", returnedErr)
+	}
+
+	return pubAck, nil
 }
 
 // MockObjectStore is a mock implementation of the core.ObjectStore interface.
@@ -40,14 +54,24 @@ func (m *MockObjectStore) Download(ctx context.Context, key string) ([]byte, err
 	args := m.Called(ctx, key)
 	data, _ := args.Get(0).([]byte)
 
-	return data, fmt.Errorf("failed to download: %w", args.Error(1))
+	returnedErr := args.Error(1)
+	if returnedErr != nil {
+		return nil, fmt.Errorf("mock download returned error for key %s: %w", key, returnedErr)
+	}
+
+	return data, nil
 }
 
 // Upload is a mock implementation of the Upload method.
 func (m *MockObjectStore) Upload(ctx context.Context, key string, data []byte) error {
 	args := m.Called(ctx, key, data)
 
-	return fmt.Errorf("failed to upload: %w", args.Error(0))
+	returnedErr := args.Error(0)
+	if returnedErr != nil {
+		return fmt.Errorf("mock upload returned error for key %s: %w", key, returnedErr)
+	}
+
+	return nil
 }
 
 // MockTTSProcessor is a mock implementation of the core.TTSProcessor interface.
@@ -60,7 +84,12 @@ func (m *MockTTSProcessor) Process(ctx context.Context, text []byte, cfg core.TT
 	args := m.Called(ctx, text, cfg)
 	data, _ := args.Get(0).([]byte)
 
-	return data, fmt.Errorf("failed to process: %w", args.Error(1))
+	returnedErr := args.Error(1)
+	if returnedErr != nil {
+		return nil, fmt.Errorf("mock process returned error: %w", returnedErr)
+	}
+
+	return data, nil
 }
 
 // GetConfig is a mock implementation of the GetConfig method.
@@ -70,7 +99,6 @@ func (m *MockTTSProcessor) GetConfig() core.TTSConfig {
 
 	return cfg
 }
-
 func newTestEvent(workflowID string) *events.TextProcessedEvent {
 	return &events.TextProcessedEvent{
 		Header: events.EventHeader{
@@ -94,32 +122,27 @@ func newTestEvent(workflowID string) *events.TextProcessedEvent {
 }
 
 func TestNatsWorker_HandleMessage_Success(t *testing.T) {
-	t.Parallel()
-	// Arrange
-	mockJetStream := new(MockJetStreamContext)
-	mockStore := new(MockObjectStore)
-	mockProcessor := new(MockTTSProcessor)
-	log, err := logger.New(t.TempDir(), "test.log")
-	require.NoError(t, err)
+    t.Parallel()
+    // Arrange
+    mockJetStream := new(MockJetStreamContext)
+    mockStore := new(MockObjectStore)
+    mockProcessor := new(MockTTSProcessor)
+    log, err := logger.New(t.TempDir(), "test.log")
+    require.NoError(t, err)
 
-	natsConnection, err := nats.Connect(nats.DefaultURL)
-	require.NoError(t, err)
+    subject := "test.subject"
+    audioChunkCreatedSubject := "test.audio.created"
 
-	defer natsConnection.Close()
-
-	subject := "test.subject"
-	audioChunkCreatedSubject := "test.audio.created"
-
-	worker, err := worker.NewNatsWorker(
-		natsConnection,
-		mockJetStream,
-		subject,
-		audioChunkCreatedSubject,
-		mockStore,
-		mockProcessor,
-		log,
-	)
-	require.NoError(t, err)
+    worker, err := worker.NewNatsWorker(
+        nil,
+        mockJetStream,
+        subject,
+        audioChunkCreatedSubject,
+        mockStore,
+        mockProcessor,
+        log,
+    )
+    require.NoError(t, err)
 
 	workflowID := uuid.New().String()
 	event := newTestEvent(workflowID)
@@ -147,13 +170,18 @@ func TestNatsWorker_HandleMessage_Success(t *testing.T) {
 		Temperature:       0.7,
 		AllowedVoices:     []string{"default"},
 	})
-	mockProcessor.On("Process", mock.Anything, []byte("hello world"), mock.Anything).Return([]byte("audio data"), nil)
-	mockStore.On("Upload", mock.Anything, mock.Anything, []byte("audio data")).Return(nil)
-	mockJetStream.On("Publish", audioChunkCreatedSubject, mock.Anything).Return(nil, nil)
+    mockProcessor.On("Process", mock.Anything, []byte("hello world"), mock.Anything).Return([]byte("audio data"), nil)
+    mockStore.On("Upload", mock.Anything, mock.Anything, []byte("audio data")).Return(nil)
+    mockJetStream.On("Publish", audioChunkCreatedSubject, mock.Anything).Return(&nats.PubAck{
+        Stream:    "test-stream",
+        Sequence:  1,
+        Duplicate: false,
+        Domain:    "",
+    }, nil)
 
 	// Act
 	worker.HandleMessage(msg)
 
 	// Assert
-	mockJetStream.AssertCalled(t, "Publish", audioChunkCreatedSubject, mock.Anything)
+    mockJetStream.AssertCalled(t, "Publish", audioChunkCreatedSubject, mock.Anything)
 }

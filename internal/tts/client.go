@@ -1,8 +1,3 @@
-// Package tts provides TTS (Text-to-Speech) functionality.
-//
-// This package implements TTS functionality that was previously
-// handled by Python utilities, following Go coding standards and design
-// principles for explicit behavior and maintainable code.
 package tts
 
 import (
