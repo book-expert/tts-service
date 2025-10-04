@@ -9,16 +9,19 @@ import (
 
 // TTSServiceConfig holds the specific configuration for the TTS service.
 type TTSServiceConfig struct {
-	ModelPath         string   `toml:"model_path"`
-	SnacModelPath     string   `toml:"snac_model_path"`
-	Voice             string   `toml:"voice"`
-	Temperature       float64  `toml:"temperature"`
-	TimeoutSeconds    int      `toml:"timeout_seconds"`
-	Seed              int      `toml:"seed"`
-	NGL               int      `toml:"ngl"`
-	TopP              float64  `toml:"top_p"`
-	RepetitionPenalty float64  `toml:"repetition_penalty"`
-	AllowedVoices     []string `toml:"allowed_voices"`
+    ModelPath         string   `toml:"model_path"`
+    SnacModelPath     string   `toml:"snac_model_path"`
+    Voice             string   `toml:"voice"`
+    Temperature       float64  `toml:"temperature"`
+    TimeoutSeconds    int      `toml:"timeout_seconds"`
+    Seed              int      `toml:"seed"`
+    NGL               int      `toml:"ngl"`
+    TopP              float64  `toml:"top_p"`
+    RepetitionPenalty float64  `toml:"repetition_penalty"`
+    AllowedVoices     []string `toml:"allowed_voices"`
+    // DeadLetterSubject is the subject to which failed messages are published.
+    // This is mandatory for robust failure handling.
+    DeadLetterSubject string   `toml:"dead_letter_subject"`
 }
 
 // Config is the root configuration structure.

@@ -46,6 +46,7 @@ type NatsWorker struct {
 	streamName               string
 	consumerName             string
 	audioChunkCreatedSubject string
+	deadLetterSubject        string
 	store                    core.ObjectStore
 	processor                core.TTSProcessor
 	log                      *logger.Logger
@@ -65,6 +66,7 @@ func NewNatsWorker(
 	subject string,
 	consumerName string,
 	audioChunkCreatedSubject string,
+	deadLetterSubject string,
 	store core.ObjectStore,
 	processor core.TTSProcessor,
 	log *logger.Logger,
@@ -77,6 +79,7 @@ func NewNatsWorker(
 		subject:                  subject,
 		consumerName:             consumerName,
 		audioChunkCreatedSubject: audioChunkCreatedSubject,
+		deadLetterSubject:        deadLetterSubject,
 		store:                    store,
 		processor:                processor,
 		log:                      log,
@@ -125,6 +128,13 @@ func (w *NatsWorker) Run(ctx context.Context) error {
 }
 
 // HandleMessage processes incoming NATS messages.
+const (
+    dlqPublishMaxRetries      = 3
+    dlqPublishBackoffDuration = 2 * time.Second
+)
+
+// HandleMessage processes a single message end-to-end, including
+// DLQ handling on failure according to the service policy.
 func (w *NatsWorker) HandleMessage(ctx context.Context, msg jetstream.Msg) {
 	ctx, cancel := context.WithTimeout(ctx, handleMessageTimeout)
 	defer cancel()
@@ -132,11 +142,7 @@ func (w *NatsWorker) HandleMessage(ctx context.Context, msg jetstream.Msg) {
 	event, err := w.parseAndValidateEvent(msg)
 	if err != nil {
 		w.log.Error("Failed to parse and validate event: %v", err)
-		// Negative acknowledge the message so it can be redelivered
-		nackErr := msg.Nak()
-		if nackErr != nil {
-			w.log.Error("Failed to NAK message: %v", nackErr)
-		}
+		w.handleFailure(ctx, msg, msg.Data())
 
 		return
 	}
@@ -144,11 +150,7 @@ func (w *NatsWorker) HandleMessage(ctx context.Context, msg jetstream.Msg) {
 	audioKey, processErr := w.processTTSJob(ctx, event)
 	if processErr != nil {
 		w.log.Error("Failed to process TTS job for event %s: %v", event.Header.WorkflowID, processErr)
-		// Negative acknowledge the message so it can be redelivered
-		nackErr := msg.Nak()
-		if nackErr != nil {
-			w.log.Error("Failed to NAK message: %v", nackErr)
-		}
+		w.handleFailure(ctx, msg, msg.Data())
 
 		return
 	}
@@ -160,14 +162,10 @@ func (w *NatsWorker) HandleMessage(ctx context.Context, msg jetstream.Msg) {
 		TotalPages: event.TotalPages,
 	}
 
-	err = w.publishEvent(ctx, replyEvent)
-	if err != nil {
-		w.log.Error("Failed to publish reply event for workflow %s: %v", event.Header.WorkflowID, err)
-		// Negative acknowledge the message so it can be redelivered
-		nackErr := msg.Nak()
-		if nackErr != nil {
-			w.log.Error("Failed to NAK message: %v", nackErr)
-		}
+	publishReplyErr := w.publishEvent(ctx, replyEvent)
+	if publishReplyErr != nil {
+		w.log.Error("Failed to publish reply event for workflow %s: %v", event.Header.WorkflowID, publishReplyErr)
+		w.handleFailure(ctx, msg, msg.Data())
 
 		return
 	}
@@ -176,6 +174,45 @@ func (w *NatsWorker) HandleMessage(ctx context.Context, msg jetstream.Msg) {
 	ackErr := msg.Ack()
 	if ackErr != nil {
 		w.log.Error("Failed to ACK message: %v", ackErr)
+	}
+}
+
+// handleFailure attempts to publish the failed payload to the DLQ subject.
+// If DLQ publish succeeds, the original message is Acked; otherwise it is Nak'd with delay.
+func (w *NatsWorker) handleFailure(ctx context.Context, msg jetstream.Msg, failedPayload []byte) {
+	if w.deadLetterSubject == "" {
+		// No DLQ configured: fall back to Nak to avoid message loss.
+		nakErr := msg.Nak()
+		if nakErr != nil {
+			w.log.Error("Failed to NAK message without DLQ: %v", nakErr)
+		}
+
+		return
+	}
+
+	var lastPublishErr error
+
+	for attempt := 1; attempt <= dlqPublishMaxRetries; attempt++ {
+		_, publishErr := w.jetstreamPublisher.Publish(ctx, w.deadLetterSubject, failedPayload)
+		if publishErr == nil {
+			ackErr := msg.Ack()
+			if ackErr != nil {
+				w.log.Error("Failed to ACK after DLQ publish: %v", ackErr)
+			}
+
+			return
+		}
+
+		lastPublishErr = publishErr
+		w.log.Warn("DLQ publish attempt %d/%d failed: %v", attempt, dlqPublishMaxRetries, publishErr)
+		time.Sleep(dlqPublishBackoffDuration)
+	}
+
+	w.log.Error("Exhausted DLQ publish retries: %v", lastPublishErr)
+	// Respect consumer backoff using NakWithDelay.
+	nakDelayErr := msg.NakWithDelay(dlqPublishBackoffDuration)
+	if nakDelayErr != nil {
+		w.log.Error("Failed to NAK with delay after DLQ failure: %v", nakDelayErr)
 	}
 }
 

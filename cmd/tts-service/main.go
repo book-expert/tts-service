@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,6 +19,29 @@ import (
 	"github.com/book-expert/tts-service/internal/worker"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+var (
+	// ErrNoStreamsConfigured indicates that no streams were defined in ServiceNATS config.
+	ErrNoStreamsConfigured = errors.New("no streams configured for service")
+	// ErrNoConsumersConfigured indicates that no consumers were defined in ServiceNATS config.
+	ErrNoConsumersConfigured = errors.New("no consumers configured for service")
+	// ErrNoObjectStoresConfigured indicates that no object stores were defined in ServiceNATS config.
+	ErrNoObjectStoresConfigured = errors.New("no object stores configured for service")
+	// ErrDeadLetterSubjectEmpty indicates the DLQ subject is missing.
+	ErrDeadLetterSubjectEmpty = errors.New("dead letter subject must be configured")
+	// ErrInvalidConsumerConfig indicates the durable consumer entry is malformed.
+	ErrInvalidConsumerConfig = errors.New(
+		"invalid consumer configuration: stream, consumer, and filter subject must be set",
+	)
+	// ErrConsumerStreamNotFound indicates the referenced consumer stream is missing.
+	ErrConsumerStreamNotFound = errors.New("consumer stream not found in streams")
+	// ErrConsumerFilterMismatch indicates the consumer filter subject is not part of its stream.
+	ErrConsumerFilterMismatch = errors.New("consumer filter subject not present in referenced stream subjects")
+	// ErrPublishSubjectDerive indicates we could not derive a publish subject from configuration.
+	ErrPublishSubjectDerive = errors.New("publish subject could not be derived from streams configuration")
+	// ErrPublishSubjectUnknown indicates the derived publish subject is not present in any stream.
+	ErrPublishSubjectUnknown = errors.New("publish subject not found in any configured stream subjects")
 )
 
 func setupLogger(logPath string) (*logger.Logger, error) {
@@ -212,6 +236,7 @@ func launchWorker(
 		consumerSubject,
 		consumerName,
 		publishSubject,
+		cfg.TTS.DeadLetterSubject,
 		store,
 		processor,
 		log,
@@ -249,6 +274,11 @@ func deriveConsumerBinding(nc *configurator.ServiceNATSConfig) (string, string, 
 }
 
 func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {
+	validateErr := validateServiceNATSConfig(cfg)
+	if validateErr != nil {
+		return nil, validateErr
+	}
+
 	natsConnection, err := setupNATS(cfg)
 	if err != nil {
 		return nil, err
@@ -290,6 +320,100 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 	}
 
 	return workerCancel, nil
+}
+
+// validateServiceNATSConfig performs fast-fail validation of the tts-service NATS configuration.
+// It ensures the presence and cross-consistency of streams, consumer, object stores, and DLQ subject.
+func validateServiceNATSConfig(cfg *config.Config) error {
+	basicErr := validateDLQAndBasics(cfg)
+	if basicErr != nil {
+		return basicErr
+	}
+
+	consumerErr := validateConsumerCrossReference(&cfg.ServiceNATS)
+	if consumerErr != nil {
+		return consumerErr
+	}
+
+	publishErr := validatePublishSubjectExists(&cfg.ServiceNATS)
+	if publishErr != nil {
+		return publishErr
+	}
+
+	return nil
+}
+
+func validateDLQAndBasics(cfg *config.Config) error {
+	if cfg.TTS.DeadLetterSubject == "" {
+		return ErrDeadLetterSubjectEmpty
+	}
+
+	serviceNATS := &cfg.ServiceNATS
+	if len(serviceNATS.Streams) == 0 {
+		return ErrNoStreamsConfigured
+	}
+
+	if len(serviceNATS.Consumers) == 0 {
+		return ErrNoConsumersConfigured
+	}
+
+	if len(serviceNATS.ObjectStores) == 0 || serviceNATS.ObjectStores[0].BucketName == "" {
+		return ErrNoObjectStoresConfigured
+	}
+
+	return nil
+}
+
+func validateConsumerCrossReference(serviceNATS *configurator.ServiceNATSConfig) error {
+	consumer := serviceNATS.Consumers[0]
+	if consumer.StreamName == "" || consumer.ConsumerName == "" || consumer.FilterSubject == "" {
+		return ErrInvalidConsumerConfig
+	}
+
+	var matchedStream *configurator.StreamConfig
+
+	for i := range serviceNATS.Streams {
+		if serviceNATS.Streams[i].Name == consumer.StreamName {
+			matchedStream = &serviceNATS.Streams[i]
+
+			break
+		}
+	}
+
+	if matchedStream == nil {
+		return ErrConsumerStreamNotFound
+	}
+
+	if !subjectInList(consumer.FilterSubject, matchedStream.Subjects) {
+		return ErrConsumerFilterMismatch
+	}
+
+	return nil
+}
+
+func validatePublishSubjectExists(serviceNATS *configurator.ServiceNATSConfig) error {
+	_, publishSubject := derivePublishStreamAndSubject(serviceNATS)
+	if publishSubject == "" {
+		return ErrPublishSubjectDerive
+	}
+
+	for _, s := range serviceNATS.Streams {
+		if subjectInList(publishSubject, s.Subjects) {
+			return nil
+		}
+	}
+
+	return ErrPublishSubjectUnknown
+}
+
+func subjectInList(needle string, haystack []string) bool {
+	for _, candidate := range haystack {
+		if candidate == needle {
+			return true
+		}
+	}
+
+	return false
 }
 
 func waitForShutdownSignal(log *logger.Logger) {
