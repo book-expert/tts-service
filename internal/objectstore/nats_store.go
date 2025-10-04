@@ -8,26 +8,25 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 // NatsObjectStore implements the core.ObjectStore interface using NATS JetStream.
 type NatsObjectStore struct {
-	jetstreamContext nats.JetStreamContext
+	jetstreamContext jetstream.JetStream
 	bucket           string
-	store            nats.ObjectStore
+	store            jetstream.ObjectStore
 }
 
 // New creates and initializes a new NatsObjectStore.
-func New(jetstreamContext nats.JetStreamContext, bucketName string) (*NatsObjectStore, error) {
+func New(ctx context.Context, jetstreamContext jetstream.JetStream, bucketName string) (*NatsObjectStore, error) {
 	// Use a "create-first" approach.
-	store, err := jetstreamContext.CreateObjectStore(&nats.ObjectStoreConfig{
+	store, err := jetstreamContext.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{
 		Bucket:      bucketName,
 		Description: fmt.Sprintf("Storage for the %s bucket.", bucketName),
 		TTL:         0,
 		MaxBytes:    0,
-		Storage:     nats.FileStorage,
+		Storage:     jetstream.FileStorage,
 		Replicas:    1,
 		Placement:   nil,
 		Metadata:    nil,
@@ -37,7 +36,7 @@ func New(jetstreamContext nats.JetStreamContext, bucketName string) (*NatsObject
 	// If the bucket already exists, bind to it.
 	if err != nil {
 		if errors.Is(err, jetstream.ErrBucketExists) {
-			store, err = jetstreamContext.ObjectStore(bucketName)
+			store, err = jetstreamContext.ObjectStore(ctx, bucketName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to bind to existing object store bucket '%s': %w", bucketName, err)
 			}
@@ -55,8 +54,8 @@ func New(jetstreamContext nats.JetStreamContext, bucketName string) (*NatsObject
 }
 
 // Download retrieves an object from the NATS object store.
-func (n *NatsObjectStore) Download(_ context.Context, key string) ([]byte, error) {
-	obj, err := n.store.Get(key)
+func (n *NatsObjectStore) Download(ctx context.Context, key string) ([]byte, error) {
+	obj, err := n.store.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object '%s' from bucket '%s': %w", key, n.bucket, err)
 	}
@@ -76,10 +75,10 @@ func (n *NatsObjectStore) Download(_ context.Context, key string) ([]byte, error
 }
 
 // Upload saves an object to the NATS object store.
-func (n *NatsObjectStore) Upload(_ context.Context, key string, data []byte) error {
+func (n *NatsObjectStore) Upload(ctx context.Context, key string, data []byte) error {
 	reader := bytes.NewReader(data)
 
-	_, err := n.store.Put(&nats.ObjectMeta{
+	_, err := n.store.Put(ctx, jetstream.ObjectMeta{
 		Name:        key,
 		Description: "",
 		Headers:     nil,

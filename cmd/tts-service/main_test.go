@@ -1,23 +1,23 @@
 package main
 
 import (
-	"github.com/nats-io/nats.go"
-	"github.com/stretchr/testify/require"
-	"testing"
+    "context"
+    "testing"
+
+    "github.com/nats-io/nats.go/jetstream"
+    "github.com/stretchr/testify/require"
 )
 
 // fakeStreamAdmin is a minimal fake implementing streamAdmin for testing.
 type fakeStreamAdmin struct {
-	lastCfg  *nats.StreamConfig
-	lastOpts []nats.JSOpt
-	called   bool
-	retErr   error
+    lastCfg jetstream.StreamConfig
+    called  bool
+    retErr  error
 }
 
-func (f *fakeStreamAdmin) AddStream(cfg *nats.StreamConfig, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
+func (f *fakeStreamAdmin) CreateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) {
 	f.called = true
 	f.lastCfg = cfg
-	f.lastOpts = opts
 
 	return nil, f.retErr
 }
@@ -32,11 +32,11 @@ func TestEnsureStreamForSubject_ConfigIsRespected(t *testing.T) {
 
 	fake := new(fakeStreamAdmin)
 
-	err := ensureStreamForSubject(fake, streamName, subject)
+	err := ensureStreamForSubject(context.Background(), fake, streamName, subject)
 	require.NoError(t, err)
 	require.True(t, fake.called)
 	require.NotNil(t, fake.lastCfg)
 	require.Equal(t, streamName, fake.lastCfg.Name)
 	require.Equal(t, []string{subject}, fake.lastCfg.Subjects)
-	require.NotEmpty(t, fake.lastOpts) // ensure we pass at least one JS option (e.g., MaxWait)
+	// Note: lastOpts checking removed as the new jetstream interface doesn't use JS options
 }

@@ -35,7 +35,7 @@ timeout_seconds = 300
 	require.NoError(t, err)
 
 	assert.Equal(t, "nats://127.0.0.1:4222", cfg.NATS.URL)
-	assert.Equal(t, "TTS_JOBS", cfg.NATS.TTStreamName)
+	assert.Equal(t, "TTS_JOBS", cfg.NATS.TTSStreamName)
 	assert.Equal(t, "tts-workers", cfg.NATS.TTSConsumerName)
 	assert.Equal(t, "text.processed", cfg.NATS.TextProcessedSubject)
 	assert.Equal(t, "audio.chunk.created", cfg.NATS.AudioChunkCreatedSubject)

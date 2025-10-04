@@ -2,21 +2,10 @@
 package config
 
 import (
-	"fmt"
-	"github.com/book-expert/configurator"
-	"github.com/book-expert/logger"
+    "fmt"
+    "github.com/book-expert/configurator"
+    "github.com/book-expert/logger"
 )
-
-// NATSConfig holds the configuration for NATS.
-type NATSConfig struct {
-    URL                      string `toml:"url"`
-    TTStreamName             string `toml:"tts_stream_name"`
-    TTSConsumerName          string `toml:"tts_consumer_name"`
-    TextProcessedSubject     string `toml:"text_processed_subject"`
-    AudioChunkCreatedSubject string `toml:"audio_chunk_created_subject"`
-    AudioObjectStoreBucket   string `toml:"audio_object_store_bucket"`
-    AudioProcessingStreamName string `toml:"audio_processing_stream_name"`
-}
 
 // TTSServiceConfig holds the specific configuration for the TTS service.
 type TTSServiceConfig struct {
@@ -33,9 +22,22 @@ type TTSServiceConfig struct {
 }
 
 // Config is the root configuration structure.
+// NATSConfig holds NATS and JetStream subject/stream configuration
+// specific to the tts-service.
+type NATSConfig struct {
+    URL                       string `toml:"url"`
+    TTSStreamName             string `toml:"tts_stream_name"`
+    TTSConsumerName           string `toml:"tts_consumer_name"`
+    TextProcessedSubject      string `toml:"text_processed_subject"`
+    AudioChunkCreatedSubject  string `toml:"audio_chunk_created_subject"`
+    AudioObjectStoreBucket    string `toml:"audio_object_store_bucket"`
+    AudioProcessingStreamName string `toml:"audio_processing_stream_name"`
+}
+
+// Config is the root configuration structure.
 type Config struct {
-	NATS NATSConfig       `toml:"nats"`
-	TTS  TTSServiceConfig `toml:"tts_service"`
+    NATS NATSConfig       `toml:"nats"`
+    TTS  TTSServiceConfig `toml:"tts_service"`
 }
 
 // Load loads the configuration for the tts-service.

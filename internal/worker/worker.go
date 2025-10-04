@@ -13,6 +13,7 @@ import (
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const handleMessageTimeout = 30 * time.Second
@@ -39,19 +40,29 @@ var (
 // NatsWorker listens for TTS jobs on a NATS subject and processes them.
 type NatsWorker struct {
 	natsConnection           *nats.Conn
-	jetstreamContext         JetStreamContext
+	jetstreamContext         JetStreamPub
 	subject                  string
+	streamName               string
+	consumerName             string
 	audioChunkCreatedSubject string
 	store                    core.ObjectStore
 	processor                core.TTSProcessor
 	log                      *logger.Logger
 }
 
+// JetStreamPub is the minimal subset of jetstream.JetStream used by the worker.
+type JetStreamPub interface {
+	Stream(ctx context.Context, stream string) (jetstream.Stream, error)
+	Publish(ctx context.Context, subject string, data []byte, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
+}
+
 // NewNatsWorker creates a new instance of a NATS worker.
 func NewNatsWorker(
 	natsConnection *nats.Conn,
-	jetstreamContext JetStreamContext,
+	jetstreamContext JetStreamPub,
+	streamName string,
 	subject string,
+	consumerName string,
 	audioChunkCreatedSubject string,
 	store core.ObjectStore,
 	processor core.TTSProcessor,
@@ -60,7 +71,9 @@ func NewNatsWorker(
 	return &NatsWorker{
 		natsConnection:           natsConnection,
 		jetstreamContext:         jetstreamContext,
+		streamName:               streamName,
 		subject:                  subject,
+		consumerName:             consumerName,
 		audioChunkCreatedSubject: audioChunkCreatedSubject,
 		store:                    store,
 		processor:                processor,
@@ -70,29 +83,58 @@ func NewNatsWorker(
 
 // Run starts the worker and begins listening for messages.
 func (w *NatsWorker) Run(ctx context.Context) error {
-	sub, err := w.natsConnection.Subscribe(w.subject, w.HandleMessage)
+	// Create or update consumer for the stream
+	stream, err := w.jetstreamContext.Stream(ctx, w.streamName)
 	if err != nil {
-		return fmt.Errorf("failed to subscribe to subject %s: %w", w.subject, err)
+		return fmt.Errorf("failed to get stream %s: %w", w.streamName, err)
 	}
 
-	<-ctx.Done()
-
-	drainErr := sub.Drain()
-	if drainErr != nil {
-		return fmt.Errorf("failed to drain subscription: %w", drainErr)
+	consumerConfig := jetstream.ConsumerConfig{
+		Durable:       w.consumerName,
+		FilterSubject: w.subject,
+		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
-	return nil
+	consumer, err := stream.CreateOrUpdateConsumer(ctx, consumerConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create consumer %s for stream %s: %w", w.consumerName, w.streamName, err)
+	}
+
+	// Consume messages from the consumer
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			msg, err := consumer.Next()
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil
+				}
+
+				w.log.Error("Failed to get next message: %v", err)
+
+				continue
+			}
+
+			w.HandleMessage(msg)
+		}
+	}
 }
 
 // HandleMessage processes incoming NATS messages.
-func (w *NatsWorker) HandleMessage(msg *nats.Msg) {
+func (w *NatsWorker) HandleMessage(msg jetstream.Msg) {
 	ctx, cancel := context.WithTimeout(context.Background(), handleMessageTimeout)
 	defer cancel()
 
 	event, err := w.parseAndValidateEvent(msg)
 	if err != nil {
 		w.log.Error("Failed to parse and validate event: %v", err)
+		// Negative acknowledge the message so it can be redelivered
+		nackErr := msg.Nak()
+		if nackErr != nil {
+			w.log.Error("Failed to NAK message: %v", nackErr)
+		}
 
 		return
 	}
@@ -100,6 +142,11 @@ func (w *NatsWorker) HandleMessage(msg *nats.Msg) {
 	audioKey, processErr := w.processTTSJob(ctx, event)
 	if processErr != nil {
 		w.log.Error("Failed to process TTS job for event %s: %v", event.Header.WorkflowID, processErr)
+		// Negative acknowledge the message so it can be redelivered
+		nackErr := msg.Nak()
+		if nackErr != nil {
+			w.log.Error("Failed to NAK message: %v", nackErr)
+		}
 
 		return
 	}
@@ -111,9 +158,22 @@ func (w *NatsWorker) HandleMessage(msg *nats.Msg) {
 		TotalPages: event.TotalPages,
 	}
 
-	err = w.publishEvent(replyEvent)
+	err = w.publishEvent(ctx, replyEvent)
 	if err != nil {
 		w.log.Error("Failed to publish reply event for workflow %s: %v", event.Header.WorkflowID, err)
+		// Negative acknowledge the message so it can be redelivered
+		nackErr := msg.Nak()
+		if nackErr != nil {
+			w.log.Error("Failed to NAK message: %v", nackErr)
+		}
+
+		return
+	}
+
+	// Acknowledge the message as processed successfully
+	ackErr := msg.Ack()
+	if ackErr != nil {
+		w.log.Error("Failed to ACK message: %v", ackErr)
 	}
 }
 
@@ -159,13 +219,13 @@ func (w *NatsWorker) processTTSJob(ctx context.Context, event *events.TextProces
 }
 
 // publishEvent marshals and publishes the AudioChunkCreatedEvent.
-func (w *NatsWorker) publishEvent(replyEvent *events.AudioChunkCreatedEvent) error {
+func (w *NatsWorker) publishEvent(ctx context.Context, replyEvent *events.AudioChunkCreatedEvent) error {
 	replyData, err := json.Marshal(replyEvent)
 	if err != nil {
 		return fmt.Errorf("failed to marshal reply event: %w", err)
 	}
 
-	_, err = w.jetstreamContext.Publish(w.audioChunkCreatedSubject, replyData)
+	_, err = w.jetstreamContext.Publish(ctx, w.audioChunkCreatedSubject, replyData)
 	if err != nil {
 		return fmt.Errorf("failed to publish reply event: %w", err)
 	}
@@ -173,10 +233,10 @@ func (w *NatsWorker) publishEvent(replyEvent *events.AudioChunkCreatedEvent) err
 	return nil
 }
 
-func (w *NatsWorker) parseAndValidateEvent(msg *nats.Msg) (*events.TextProcessedEvent, error) {
+func (w *NatsWorker) parseAndValidateEvent(msg jetstream.Msg) (*events.TextProcessedEvent, error) {
 	var event events.TextProcessedEvent
 
-	err := json.Unmarshal(msg.Data, &event)
+	err := json.Unmarshal(msg.Data(), &event)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal event: %w", err)
 	}

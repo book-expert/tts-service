@@ -2,14 +2,15 @@
 package objectstore_test
 
 import (
-	"context"
-	"testing"
+    "context"
+    "testing"
 
-	"github.com/book-expert/tts-service/internal/objectstore"
-	"github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats-server/v2/test"
-	"github.com/nats-io/nats.go"
-	"github.com/stretchr/testify/require"
+    "github.com/book-expert/tts-service/internal/objectstore"
+    "github.com/nats-io/nats-server/v2/server"
+    "github.com/nats-io/nats-server/v2/test"
+    "github.com/nats-io/nats.go"
+    "github.com/nats-io/nats.go/jetstream"
+    "github.com/stretchr/testify/require"
 )
 
 // StartTestServer starts an in-memory NATS server for testing purposes.
@@ -37,11 +38,11 @@ func TestNatsObjectStore_UploadDownload(t *testing.T) {
 	defer natsServer.Shutdown()
 	defer natsConnection.Close()
 
-	jetstreamContext, err := natsConnection.JetStream()
+	jetstreamContext, err := jetstream.New(natsConnection)
 	require.NoError(t, err)
 
 	bucketName := "test-bucket"
-	store, err := objectstore.New(jetstreamContext, bucketName)
+	store, err := objectstore.New(context.Background(), jetstreamContext, bucketName)
 	require.NoError(t, err)
 
 	// 2. Test Data
