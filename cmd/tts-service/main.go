@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/book-expert/configurator"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/config"
 	"github.com/book-expert/tts-service/internal/core"
@@ -56,7 +57,7 @@ const (
 )
 
 func setupNATS(cfg *config.Config) (*nats.Conn, error) {
-	natsConnection, err := nats.Connect(cfg.NATS.URL,
+	natsConnection, err := nats.Connect(cfg.ServiceNATS.NATS.URL,
 		nats.Timeout(natsConnectTimeout),
 		nats.RetryOnFailedConnect(true))
 	if err != nil {
@@ -125,18 +126,20 @@ func verifyJetStreamAvailable(ctx context.Context, jetstreamContext jetstream.Je
 }
 
 func ensureAudioProcessingStream(ctx context.Context, jetstreamContext jetstream.JetStream, cfg *config.Config) error {
+	streamName, subject := derivePublishStreamAndSubject(&cfg.ServiceNATS)
+
 	streamErr := ensureStreamForSubject(
 		ctx,
-		func(c context.Context, cfg jetstream.StreamConfig) error {
-			_, createErr := jetstreamContext.CreateStream(c, cfg)
+		func(c context.Context, sCfg jetstream.StreamConfig) error {
+			_, createErr := jetstreamContext.CreateStream(c, sCfg)
 			if createErr != nil {
 				return fmt.Errorf("create stream: %w", createErr)
 			}
 
 			return nil
 		},
-		cfg.NATS.AudioProcessingStreamName,
-		cfg.NATS.AudioChunkCreatedSubject,
+		streamName,
+		subject,
 	)
 	if streamErr != nil {
 		return fmt.Errorf("failed to ensure audio chunk stream: %w", streamErr)
@@ -151,7 +154,9 @@ func initStoresAndProcessor(
 	cfg *config.Config,
 	log *logger.Logger,
 ) (*objectstore.NatsObjectStore, *tts.ChatLLMProcessor, error) {
-	store, storeErr := objectstore.New(ctx, jetstreamContext, cfg.NATS.AudioObjectStoreBucket)
+	bucket := deriveFirstObjectStoreBucket(&cfg.ServiceNATS)
+
+	store, storeErr := objectstore.New(ctx, jetstreamContext, bucket)
 	if storeErr != nil {
 		return nil, nil, fmt.Errorf("failed to create object store: %w", storeErr)
 	}
@@ -164,6 +169,27 @@ func initStoresAndProcessor(
 	return store, processor, nil
 }
 
+func deriveFirstObjectStoreBucket(nc *configurator.ServiceNATSConfig) string {
+	if len(nc.ObjectStores) > 0 {
+		return nc.ObjectStores[0].BucketName
+	}
+
+	return ""
+}
+
+func derivePublishStreamAndSubject(nc *configurator.ServiceNATSConfig) (string, string) {
+	if len(nc.Streams) > 0 {
+		stream := nc.Streams[0]
+		if len(stream.Subjects) > 0 {
+			return stream.Name, stream.Subjects[0]
+		}
+
+		return stream.Name, ""
+	}
+
+	return "", ""
+}
+
 func launchWorker(
 	ctx context.Context,
 	natsConnection *nats.Conn,
@@ -173,14 +199,19 @@ func launchWorker(
 	processor core.TTSProcessor,
 	log *logger.Logger,
 ) (context.CancelFunc, error) {
+	consumerStream, consumerSubject, consumerName := deriveConsumerBinding(&cfg.ServiceNATS)
+	publishStream, publishSubject := derivePublishStreamAndSubject(&cfg.ServiceNATS)
+
+	_ = publishStream // stream name is used for ensuring stream only
+
 	natsWorker, workerErr := worker.NewNatsWorker(
 		natsConnection,
 		jetstreamContext,
 		jetstreamContext,
-		cfg.NATS.TTSStreamName,
-		cfg.NATS.TextProcessedSubject,
-		cfg.NATS.TTSConsumerName,
-		cfg.NATS.AudioChunkCreatedSubject,
+		consumerStream,
+		consumerSubject,
+		consumerName,
+		publishSubject,
 		store,
 		processor,
 		log,
@@ -201,9 +232,20 @@ func launchWorker(
 		}
 	}()
 
-	log.System("TTS-Service successfully initialized. Listening for jobs on subject: %s", cfg.NATS.TextProcessedSubject)
+	_, consumerSubject, _ = deriveConsumerBinding(&cfg.ServiceNATS)
+	log.System("TTS-Service successfully initialized. Listening for jobs on subject: %s", consumerSubject)
 
 	return workerCancel, nil
+}
+
+func deriveConsumerBinding(nc *configurator.ServiceNATSConfig) (string, string, string) {
+	if len(nc.Consumers) > 0 {
+		c := nc.Consumers[0]
+
+		return c.StreamName, c.FilterSubject, c.ConsumerName
+	}
+
+	return "", "", ""
 }
 
 func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {

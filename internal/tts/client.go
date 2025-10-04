@@ -1,15 +1,16 @@
 package tts
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "net/http"
+    "time"
+
+    "github.com/book-expert/logger"
 )
 
 // API endpoints and paths.
@@ -73,8 +74,9 @@ func newServiceNonOKStatusError(status, body string) error {
 // It encapsulates the HTTP configuration and provides methods for
 // speech generation and health monitoring.
 type HTTPClient struct {
-	httpClient *http.Client
-	baseURL    string
+    httpClient *http.Client
+    baseURL    string
+    log        *logger.Logger
 }
 
 // Request defines the JSON payload structure for TTS generation requests.
@@ -110,16 +112,17 @@ type ErrorResponse struct {
 // NewHTTPClient creates and configures an HTTP client for the TTS service.
 // The baseURL should include the protocol and port (e.g., "http://localhost:8000").
 // The timeout applies to all HTTP requests made by this client.
-func NewHTTPClient(baseURL string, timeout time.Duration) *HTTPClient {
-	return &HTTPClient{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Transport:     nil,
-			CheckRedirect: nil,
-			Jar:           nil,
-			Timeout:       timeout,
-		},
-	}
+func NewHTTPClient(baseURL string, timeout time.Duration, log *logger.Logger) *HTTPClient {
+    return &HTTPClient{
+        baseURL: baseURL,
+        httpClient: &http.Client{
+            Transport:     nil,
+            CheckRedirect: nil,
+            Jar:           nil,
+            Timeout:       timeout,
+        },
+        log: log,
+    }
 }
 
 // GenerateSpeech sends a TTS generation request and returns the raw audio data.
@@ -144,12 +147,12 @@ func (c *HTTPClient) GenerateSpeech(ctx context.Context, req Request) ([]byte, e
 		return nil, err
 	}
 
-	defer func() {
-		closeErr := resp.Body.Close()
-		if closeErr != nil {
-			log.Printf("Warning: failed to close response body: %v", closeErr)
-		}
-	}()
+    defer func() {
+        closeErr := resp.Body.Close()
+        if closeErr != nil && c.log != nil {
+            c.log.Warn("failed to close response body: %v", closeErr)
+        }
+    }()
 
 	return c.processResponse(resp)
 }
@@ -177,12 +180,12 @@ func (c *HTTPClient) HealthCheck(ctx context.Context) error {
 		)
 	}
 
-	defer func() {
-		closeErr := resp.Body.Close()
-		if closeErr != nil {
-			log.Printf("Warning: failed to close response body: %v", closeErr)
-		}
-	}()
+    defer func() {
+        closeErr := resp.Body.Close()
+        if closeErr != nil && c.log != nil {
+            c.log.Warn("failed to close response body: %v", closeErr)
+        }
+    }()
 
 	if resp.StatusCode != http.StatusOK {
 		return newHealthCheckFailedError(resp.Status)
