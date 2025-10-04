@@ -68,50 +68,25 @@ func setupNATS(cfg *config.Config) (*nats.Conn, error) {
 
 // streamAdmin defines the minimal capability needed to manage streams.
 // Using a narrow interface here makes the function easy to unit test.
-type streamAdmin interface {
-	CreateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error)
-}
+type streamCreator func(ctx context.Context, cfg jetstream.StreamConfig) error
 
-func ensureStreamForSubject(ctx context.Context, jetstreamContext streamAdmin, streamName, subject string) error {
-	streamCfg := jetstream.StreamConfig{
-		Name:                   streamName,
-		Subjects:               []string{subject},
-		Retention:              jetstream.WorkQueuePolicy,
-		Description:            "",
-		MaxConsumers:           -1,
-		MaxMsgs:                -1,
-		MaxBytes:               -1,
-		Discard:                jetstream.DiscardOld,
-		DiscardNewPerSubject:   false,
-		MaxAge:                 0,
-		MaxMsgsPerSubject:      -1,
-		MaxMsgSize:             -1,
-		Storage:                jetstream.FileStorage,
-		Replicas:               1,
-		NoAck:                  false,
-		Duplicates:             0,
-		Placement:              nil,
-		Mirror:                 nil,
-		Sources:                nil,
-		Sealed:                 false,
-		DenyDelete:             false,
-		DenyPurge:              false,
-		AllowRollup:            false,
-		Compression:            jetstream.NoCompression,
-		FirstSeq:               0,
-		SubjectTransform:       nil,
-		RePublish:              nil,
-		AllowDirect:            false,
-		MirrorDirect:           false,
-		ConsumerLimits:         jetstream.StreamConsumerLimits{InactiveThreshold: 0, MaxAckPending: 0},
-		Metadata:               nil,
-		Template:               "",
-		AllowMsgTTL:            false,
-		SubjectDeleteMarkerTTL: 0,
-	}
+func ensureStreamForSubject(ctx context.Context, create streamCreator, streamName, subject string) error {
+	var streamCfg jetstream.StreamConfig
+
+	streamCfg.Name = streamName
+	streamCfg.Subjects = []string{subject}
+	streamCfg.Retention = jetstream.WorkQueuePolicy
+	streamCfg.MaxConsumers = -1
+	streamCfg.MaxMsgs = -1
+	streamCfg.MaxBytes = -1
+	streamCfg.Discard = jetstream.DiscardOld
+	streamCfg.Storage = jetstream.FileStorage
+	streamCfg.Replicas = 1
+	streamCfg.Compression = jetstream.NoCompression
+	streamCfg.ConsumerLimits = jetstream.StreamConsumerLimits{InactiveThreshold: 0, MaxAckPending: 0}
 
 	// Bound the server-side request latency for creating the stream.
-	_, err := jetstreamContext.CreateStream(ctx, streamCfg)
+	err := create(ctx, streamCfg)
 	if err != nil {
 		return fmt.Errorf("failed to add stream '%s' for subject '%s': %w", streamName, subject, err)
 	}
@@ -152,7 +127,14 @@ func verifyJetStreamAvailable(ctx context.Context, jetstreamContext jetstream.Je
 func ensureAudioProcessingStream(ctx context.Context, jetstreamContext jetstream.JetStream, cfg *config.Config) error {
 	streamErr := ensureStreamForSubject(
 		ctx,
-		jetstreamContext,
+		func(c context.Context, cfg jetstream.StreamConfig) error {
+			_, createErr := jetstreamContext.CreateStream(c, cfg)
+			if createErr != nil {
+				return fmt.Errorf("create stream: %w", createErr)
+			}
+
+			return nil
+		},
 		cfg.NATS.AudioProcessingStreamName,
 		cfg.NATS.AudioChunkCreatedSubject,
 	)
@@ -164,10 +146,10 @@ func ensureAudioProcessingStream(ctx context.Context, jetstreamContext jetstream
 }
 
 func initStoresAndProcessor(
-    ctx context.Context,
-    jetstreamContext jetstream.JetStream,
-    cfg *config.Config,
-    log *logger.Logger,
+	ctx context.Context,
+	jetstreamContext jetstream.JetStream,
+	cfg *config.Config,
+	log *logger.Logger,
 ) (*objectstore.NatsObjectStore, *tts.ChatLLMProcessor, error) {
 	store, storeErr := objectstore.New(ctx, jetstreamContext, cfg.NATS.AudioObjectStoreBucket)
 	if storeErr != nil {
@@ -179,7 +161,7 @@ func initStoresAndProcessor(
 		return nil, nil, procErr
 	}
 
-    return store, processor, nil
+	return store, processor, nil
 }
 
 func launchWorker(
@@ -193,6 +175,7 @@ func launchWorker(
 ) (context.CancelFunc, error) {
 	natsWorker, workerErr := worker.NewNatsWorker(
 		natsConnection,
+		jetstreamContext,
 		jetstreamContext,
 		cfg.NATS.TTSStreamName,
 		cfg.NATS.TextProcessedSubject,
@@ -250,7 +233,7 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 		return nil, ensureStreamErr
 	}
 
-    store, processor, initErr := initStoresAndProcessor(ctx, jetstreamContext, cfg, log)
+	store, processor, initErr := initStoresAndProcessor(ctx, jetstreamContext, cfg, log)
 	if initErr != nil {
 		natsConnection.Close()
 

@@ -21,7 +21,6 @@ type TTSServiceConfig struct {
 	AllowedVoices     []string `toml:"allowed_voices"`
 }
 
-// Config is the root configuration structure.
 // NATSConfig holds NATS and JetStream subject/stream configuration
 // specific to the tts-service.
 type NATSConfig struct {

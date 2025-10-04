@@ -1,25 +1,25 @@
 package main
 
 import (
-    "context"
-    "testing"
+	"context"
+	"testing"
 
-    "github.com/nats-io/nats.go/jetstream"
-    "github.com/stretchr/testify/require"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeStreamAdmin is a minimal fake implementing streamAdmin for testing.
-type fakeStreamAdmin struct {
-    lastCfg jetstream.StreamConfig
-    called  bool
-    retErr  error
+type fakeCreate struct {
+	lastCfg jetstream.StreamConfig
+	called  bool
+	retErr  error
 }
 
-func (f *fakeStreamAdmin) CreateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) {
-	f.called = true
-	f.lastCfg = cfg
+func (f *fakeCreate) fn(_ context.Context, cfg jetstream.StreamConfig) error {
+    f.called = true
+    f.lastCfg = cfg
 
-	return nil, f.retErr
+    return f.retErr
 }
 
 func TestEnsureStreamForSubject_ConfigIsRespected(t *testing.T) {
@@ -30,9 +30,9 @@ func TestEnsureStreamForSubject_ConfigIsRespected(t *testing.T) {
 		subject    = "audio.chunk.created"
 	)
 
-	fake := new(fakeStreamAdmin)
+	fake := new(fakeCreate)
 
-	err := ensureStreamForSubject(context.Background(), fake, streamName, subject)
+	err := ensureStreamForSubject(context.Background(), fake.fn, streamName, subject)
 	require.NoError(t, err)
 	require.True(t, fake.called)
 	require.NotNil(t, fake.lastCfg)

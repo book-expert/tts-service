@@ -40,7 +40,8 @@ var (
 // NatsWorker listens for TTS jobs on a NATS subject and processes them.
 type NatsWorker struct {
 	natsConnection           *nats.Conn
-	jetstreamContext         JetStreamPub
+	jetstreamPublisher       JetStreamPub
+	jetstreamAdmin           jetstream.JetStream
 	subject                  string
 	streamName               string
 	consumerName             string
@@ -52,14 +53,14 @@ type NatsWorker struct {
 
 // JetStreamPub is the minimal subset of jetstream.JetStream used by the worker.
 type JetStreamPub interface {
-	Stream(ctx context.Context, stream string) (jetstream.Stream, error)
 	Publish(ctx context.Context, subject string, data []byte, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 }
 
 // NewNatsWorker creates a new instance of a NATS worker.
 func NewNatsWorker(
 	natsConnection *nats.Conn,
-	jetstreamContext JetStreamPub,
+	jetstreamAdmin jetstream.JetStream,
+	jetstreamPublisher JetStreamPub,
 	streamName string,
 	subject string,
 	consumerName string,
@@ -70,7 +71,8 @@ func NewNatsWorker(
 ) (*NatsWorker, error) {
 	return &NatsWorker{
 		natsConnection:           natsConnection,
-		jetstreamContext:         jetstreamContext,
+		jetstreamPublisher:       jetstreamPublisher,
+		jetstreamAdmin:           jetstreamAdmin,
 		streamName:               streamName,
 		subject:                  subject,
 		consumerName:             consumerName,
@@ -84,16 +86,16 @@ func NewNatsWorker(
 // Run starts the worker and begins listening for messages.
 func (w *NatsWorker) Run(ctx context.Context) error {
 	// Create or update consumer for the stream
-	stream, err := w.jetstreamContext.Stream(ctx, w.streamName)
+	stream, err := w.jetstreamAdmin.Stream(ctx, w.streamName)
 	if err != nil {
 		return fmt.Errorf("failed to get stream %s: %w", w.streamName, err)
 	}
 
-	consumerConfig := jetstream.ConsumerConfig{
-		Durable:       w.consumerName,
-		FilterSubject: w.subject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-	}
+	var consumerConfig jetstream.ConsumerConfig
+
+	consumerConfig.Durable = w.consumerName
+	consumerConfig.FilterSubject = w.subject
+	consumerConfig.AckPolicy = jetstream.AckExplicitPolicy
 
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, consumerConfig)
 	if err != nil {
@@ -117,14 +119,14 @@ func (w *NatsWorker) Run(ctx context.Context) error {
 				continue
 			}
 
-			w.HandleMessage(msg)
+			w.HandleMessage(ctx, msg)
 		}
 	}
 }
 
 // HandleMessage processes incoming NATS messages.
-func (w *NatsWorker) HandleMessage(msg jetstream.Msg) {
-	ctx, cancel := context.WithTimeout(context.Background(), handleMessageTimeout)
+func (w *NatsWorker) HandleMessage(ctx context.Context, msg jetstream.Msg) {
+	ctx, cancel := context.WithTimeout(ctx, handleMessageTimeout)
 	defer cancel()
 
 	event, err := w.parseAndValidateEvent(msg)
@@ -225,7 +227,7 @@ func (w *NatsWorker) publishEvent(ctx context.Context, replyEvent *events.AudioC
 		return fmt.Errorf("failed to marshal reply event: %w", err)
 	}
 
-	_, err = w.jetstreamContext.Publish(ctx, w.audioChunkCreatedSubject, replyData)
+	_, err = w.jetstreamPublisher.Publish(ctx, w.audioChunkCreatedSubject, replyData)
 	if err != nil {
 		return fmt.Errorf("failed to publish reply event: %w", err)
 	}
