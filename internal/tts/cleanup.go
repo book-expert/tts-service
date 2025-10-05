@@ -45,7 +45,8 @@ const (
 	replacementSeparator = ", "
 )
 
-// CleanupReport provides information about cleanup opportunities.
+// CleanupReport provides information about cleanup opportunities. This struct is
+// used to generate a report of the cleanup analysis.
 type CleanupReport struct {
 	RemovedFiles    []string
 	RemovedDirs     []string
@@ -176,8 +177,9 @@ func generateRecommendations() []string {
 	}
 }
 
-// AnalyzeOuteTTSCleanup analyzes the OuteTTS directory structure and generates
-// a cleanup report with recommendations for file and directory management.
+// AnalyzeOuteTTSCleanup analyzes the OuteTTS directory structure and generates a
+// cleanup report with recommendations for file and directory management. This
+// function is the main entry point for the cleanup analysis.
 func AnalyzeOuteTTSCleanup(outettsDir string) (*CleanupReport, error) {
 	report := &CleanupReport{
 		RemovedFiles:    []string{},
@@ -284,8 +286,9 @@ func formatSummarySection(report *CleanupReport) string {
 	return result.String()
 }
 
-// FormatCleanupReport formats a cleanup report as a string.
-// It displays files and directories to be removed/kept, recommendations, and errors.
+// FormatCleanupReport formats a cleanup report as a string. This function is
+// responsible for generating a human-readable report from the CleanupReport
+// struct.
 func FormatCleanupReport(report *CleanupReport) string {
 	var result strings.Builder
 	result.WriteString(reportHeaderAnalysis)
@@ -302,7 +305,8 @@ func FormatCleanupReport(report *CleanupReport) string {
 	return result.String()
 }
 
-// GetGoReplacements returns a map of Python files to their Go replacements.
+// GetGoReplacements returns a map of Python files to their Go replacements. This
+// function is used to validate that the Go replacements exist.
 func GetGoReplacements() map[string]string {
 	return map[string]string{
 		"utils/chunking.py":      "internal/chunking/chunking.go",
@@ -314,7 +318,9 @@ func GetGoReplacements() map[string]string {
 	}
 }
 
-// ValidateGoImplementation checks if Go replacements exist.
+// ValidateGoImplementation checks if Go replacements exist. This function is
+// used to ensure that all the Python files that are supposed to be replaced by
+// Go implementations have a corresponding Go file.
 func ValidateGoImplementation() error {
 	replacements := GetGoReplacements()
 

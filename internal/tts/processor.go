@@ -16,13 +16,17 @@ import (
 // ErrNotImplemented is returned when a method is not yet implemented.
 var ErrNotImplemented = errors.New("not yet implemented")
 
-// ChatLLMProcessor implements the core.TTSProcessor interface by calling the chatllm binary.
+// ChatLLMProcessor implements the core.TTSProcessor interface by calling the
+// chatllm binary. This struct is responsible for all the interactions with the
+// chatllm binary.
 type ChatLLMProcessor struct {
 	config core.TTSConfig
 	log    *logger.Logger
 }
 
-// New creates a new ChatLLMProcessor.
+// New creates a new ChatLLMProcessor. This function is the designated
+// constructor for the ChatLLMProcessor struct and ensures that the processor is
+// initialized with a valid configuration.
 func New(cfg core.TTSConfig, log *logger.Logger) (*ChatLLMProcessor, error) {
 	return &ChatLLMProcessor{
 		config: cfg,
@@ -30,12 +34,15 @@ func New(cfg core.TTSConfig, log *logger.Logger) (*ChatLLMProcessor, error) {
 	}, nil
 }
 
-// GetConfig returns the TTS configuration.
+// GetConfig returns the TTS configuration. This function is a simple getter that
+// returns the configuration of the processor.
 func (p *ChatLLMProcessor) GetConfig() core.TTSConfig {
 	return p.config
 }
 
 // Process takes text and returns the raw audio data by calling the chatllm binary.
+// This function is the main entry point for the TTS processor and is responsible
+// for orchestrating the entire TTS generation process.
 func (p *ChatLLMProcessor) Process(ctx context.Context, text []byte, cfg core.TTSConfig) ([]byte, error) {
 	tempFile, err := os.CreateTemp("", "tts-output-*.pcm")
 	if err != nil {

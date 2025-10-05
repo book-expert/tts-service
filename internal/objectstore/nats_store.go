@@ -12,13 +12,16 @@ import (
 )
 
 // NatsObjectStore implements the core.ObjectStore interface using NATS JetStream.
+// This struct is responsible for all the interactions with the NATS object store.
 type NatsObjectStore struct {
 	jetstreamContext jetstream.JetStream
 	bucket           string
 	store            jetstream.ObjectStore
 }
 
-// New creates and initializes a new NatsObjectStore.
+// New creates and initializes a new NatsObjectStore. This function is the
+// designated constructor for the NatsObjectStore struct and ensures that the
+// object store is initialized with a valid bucket.
 func New(ctx context.Context, jetstreamContext jetstream.JetStream, bucketName string) (*NatsObjectStore, error) {
 	// Use a "create-first" approach.
 	store, err := jetstreamContext.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{
@@ -53,7 +56,9 @@ func New(ctx context.Context, jetstreamContext jetstream.JetStream, bucketName s
 	}, nil
 }
 
-// Download retrieves an object from the NATS object store.
+// Download retrieves an object from the NATS object store. This function is
+// responsible for all the logic related to downloading an object from the NATS
+// object store.
 func (n *NatsObjectStore) Download(ctx context.Context, key string) ([]byte, error) {
 	obj, err := n.store.Get(ctx, key)
 	if err != nil {
@@ -74,7 +79,8 @@ func (n *NatsObjectStore) Download(ctx context.Context, key string) ([]byte, err
 	return data, nil
 }
 
-// Upload saves an object to the NATS object store.
+// Upload saves an object to the NATS object store. This function is responsible
+// for all the logic related to uploading an object to the NATS object store.
 func (n *NatsObjectStore) Upload(ctx context.Context, key string, data []byte) error {
 	reader := bytes.NewReader(data)
 

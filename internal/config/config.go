@@ -7,7 +7,8 @@ import (
     "github.com/book-expert/logger"
 )
 
-// TTSServiceConfig holds the specific configuration for the TTS service.
+// TTSServiceConfig holds the specific configuration for the TTS service. This
+// struct is used to configure the TTS processor and the NATS worker.
 type TTSServiceConfig struct {
     ModelPath         string   `toml:"model_path"`
     SnacModelPath     string   `toml:"snac_model_path"`
@@ -24,13 +25,16 @@ type TTSServiceConfig struct {
     DeadLetterSubject string   `toml:"dead_letter_subject"`
 }
 
-// Config is the root configuration structure.
+// Config is the root configuration structure. This struct is the main data
+// structure that is passed to the application to configure it.
 type Config struct {
     ServiceNATS configurator.ServiceNATSConfig `toml:"tts-service"`
     TTS         TTSServiceConfig               `toml:"tts_service"`
 }
 
-// Load loads the configuration for the tts-service.
+// Load loads the configuration for the tts-service. This function is the single
+// entry point for loading the configuration and ensures that the application
+// starts with a valid and complete configuration.
 func Load(log *logger.Logger) (*Config, error) {
 	var cfg Config
 
