@@ -16,7 +16,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-const handleMessageTimeout = 30 * time.Second
+const (
+	handleMessageTimeout    = 30 * time.Second
+	NatsFetchMaxWaitSeconds = 10
+)
 
 var (
 	// ErrModelPathEmpty indicates that the model path is empty.
@@ -111,18 +114,17 @@ func (w *NatsWorker) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		default:
-			msg, err := consumer.Next()
+			batch, err := consumer.Fetch(1, jetstream.FetchMaxWait(NatsFetchMaxWaitSeconds*time.Second))
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return nil
+				if errors.Is(err, nats.ErrTimeout) {
+					continue
 				}
-
-				w.log.Error("Failed to get next message: %v", err)
-
+				w.log.Error("Failed to fetch messages: %v", err)
 				continue
 			}
-
-			w.HandleMessage(ctx, msg)
+			for msg := range batch.Messages() {
+				w.HandleMessage(ctx, msg)
+			}
 		}
 	}
 }
