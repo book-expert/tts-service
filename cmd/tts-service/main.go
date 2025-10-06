@@ -91,33 +91,7 @@ func setupNATS(cfg *config.Config) (*nats.Conn, error) {
 	return natsConnection, nil
 }
 
-// streamAdmin defines the minimal capability needed to manage streams.
-// Using a narrow interface here makes the function easy to unit test.
-type streamCreator func(ctx context.Context, cfg jetstream.StreamConfig) error
 
-func ensureStreamForSubject(ctx context.Context, create streamCreator, streamName, subject string) error {
-	var streamCfg jetstream.StreamConfig
-
-	streamCfg.Name = streamName
-	streamCfg.Subjects = []string{subject}
-	streamCfg.Retention = jetstream.WorkQueuePolicy
-	streamCfg.MaxConsumers = -1
-	streamCfg.MaxMsgs = -1
-	streamCfg.MaxBytes = -1
-	streamCfg.Discard = jetstream.DiscardOld
-	streamCfg.Storage = jetstream.FileStorage
-	streamCfg.Replicas = 1
-	streamCfg.Compression = jetstream.NoCompression
-	streamCfg.ConsumerLimits = jetstream.StreamConsumerLimits{InactiveThreshold: 0, MaxAckPending: 0}
-
-	// Bound the server-side request latency for creating the stream.
-	err := create(ctx, streamCfg)
-	if err != nil {
-		return fmt.Errorf("failed to add stream '%s' for subject '%s': %w", streamName, subject, err)
-	}
-
-	return nil
-}
 
 // streamNameForSubject removed; explicit stream names come from configuration.
 
@@ -149,28 +123,7 @@ func verifyJetStreamAvailable(ctx context.Context, jetstreamContext jetstream.Je
 	return nil
 }
 
-func ensureAudioProcessingStream(ctx context.Context, jetstreamContext jetstream.JetStream, cfg *config.Config) error {
-	streamName, subject := derivePublishStreamAndSubject(&cfg.ServiceConfig.NATS)
 
-	streamErr := ensureStreamForSubject(
-		ctx,
-		func(c context.Context, sCfg jetstream.StreamConfig) error {
-			_, createErr := jetstreamContext.CreateStream(c, sCfg)
-			if createErr != nil {
-				return fmt.Errorf("create stream: %w", createErr)
-			}
-
-			return nil
-		},
-		streamName,
-		subject,
-	)
-	if streamErr != nil {
-		return fmt.Errorf("failed to ensure audio chunk stream: %w", streamErr)
-	}
-
-	return nil
-}
 
 func initStoresAndProcessor(
 	ctx context.Context,
@@ -298,11 +251,10 @@ func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (c
 		return nil, verifyErr
 	}
 
-	ensureStreamErr := ensureAudioProcessingStream(ctx, jetstreamContext, cfg)
-	if ensureStreamErr != nil {
+	err = configurator.CreateOrUpdateStreams(ctx, jetstreamContext, cfg.ServiceConfig.NATS.Streams)
+	if err != nil {
 		natsConnection.Close()
-
-		return nil, ensureStreamErr
+		return nil, fmt.Errorf("failed to create or update streams: %w", err)
 	}
 
 	store, processor, initErr := initStoresAndProcessor(ctx, jetstreamContext, cfg, log)
