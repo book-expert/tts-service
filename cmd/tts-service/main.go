@@ -81,7 +81,7 @@ const (
 )
 
 func setupNATS(cfg *config.Config) (*nats.Conn, error) {
-	natsConnection, err := nats.Connect(cfg.ServiceNATS.NATS.URL,
+	natsConnection, err := nats.Connect(cfg.ServiceConfig.NATS.NATS.URL,
 		nats.Timeout(natsConnectTimeout),
 		nats.RetryOnFailedConnect(true))
 	if err != nil {
@@ -150,7 +150,7 @@ func verifyJetStreamAvailable(ctx context.Context, jetstreamContext jetstream.Je
 }
 
 func ensureAudioProcessingStream(ctx context.Context, jetstreamContext jetstream.JetStream, cfg *config.Config) error {
-	streamName, subject := derivePublishStreamAndSubject(&cfg.ServiceNATS)
+	streamName, subject := derivePublishStreamAndSubject(&cfg.ServiceConfig.NATS)
 
 	streamErr := ensureStreamForSubject(
 		ctx,
@@ -178,7 +178,7 @@ func initStoresAndProcessor(
 	cfg *config.Config,
 	log *logger.Logger,
 ) (*objectstore.NatsObjectStore, *tts.ChatLLMProcessor, error) {
-	bucket := deriveFirstObjectStoreBucket(&cfg.ServiceNATS)
+	bucket := deriveFirstObjectStoreBucket(&cfg.ServiceConfig.NATS)
 
 	store, storeErr := objectstore.New(ctx, jetstreamContext, bucket)
 	if storeErr != nil {
@@ -223,8 +223,8 @@ func launchWorker(
 	processor core.TTSProcessor,
 	log *logger.Logger,
 ) (context.CancelFunc, error) {
-	consumerStream, consumerSubject, consumerName := deriveConsumerBinding(&cfg.ServiceNATS)
-	publishStream, publishSubject := derivePublishStreamAndSubject(&cfg.ServiceNATS)
+	consumerStream, consumerSubject, consumerName := deriveConsumerBinding(&cfg.ServiceConfig.NATS)
+	publishStream, publishSubject := derivePublishStreamAndSubject(&cfg.ServiceConfig.NATS)
 
 	_ = publishStream // stream name is used for ensuring stream only
 
@@ -257,7 +257,7 @@ func launchWorker(
 		}
 	}()
 
-	_, consumerSubject, _ = deriveConsumerBinding(&cfg.ServiceNATS)
+	_, consumerSubject, _ = deriveConsumerBinding(&cfg.ServiceConfig.NATS)
 	log.System("TTS-Service successfully initialized. Listening for jobs on subject: %s", consumerSubject)
 
 	return workerCancel, nil
@@ -330,12 +330,12 @@ func validateServiceNATSConfig(cfg *config.Config) error {
 		return basicErr
 	}
 
-	consumerErr := validateConsumerCrossReference(&cfg.ServiceNATS)
+	consumerErr := validateConsumerCrossReference(&cfg.ServiceConfig.NATS)
 	if consumerErr != nil {
 		return consumerErr
 	}
 
-	publishErr := validatePublishSubjectExists(&cfg.ServiceNATS)
+	publishErr := validatePublishSubjectExists(&cfg.ServiceConfig.NATS)
 	if publishErr != nil {
 		return publishErr
 	}
@@ -348,7 +348,7 @@ func validateDLQAndBasics(cfg *config.Config) error {
 		return ErrDeadLetterSubjectEmpty
 	}
 
-	serviceNATS := &cfg.ServiceNATS
+	serviceNATS := &cfg.ServiceConfig.NATS
 	if len(serviceNATS.Streams) == 0 {
 		return ErrNoStreamsConfigured
 	}
