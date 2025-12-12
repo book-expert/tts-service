@@ -1,4 +1,5 @@
 [service]
+log_dir = "./logs"
 workers = 5
 
 [tts]
