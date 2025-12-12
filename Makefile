@@ -2,13 +2,11 @@
 GO_PACKAGES := ./...
 SERVICE_NAME := tts-service
 SERVICE_ENTRYPOINT := ./cmd/tts-service
-BINARY_DIRECTORY := $(HOME)/bin
-BINARY_PATH := $(BINARY_DIRECTORY)/$(SERVICE_NAME)
+BINARY_PATH := ./$(SERVICE_NAME)
 
 .PHONY: build test test-cover test-race clean fmt vet lint run install help
 
 build:
-	mkdir -p $(BINARY_DIRECTORY)
 	go build -o $(BINARY_PATH) $(SERVICE_ENTRYPOINT)
 
 test:
@@ -44,7 +42,7 @@ install:
 
 help:
 	@echo "Available targets:"
-	@echo "  build        - Build the application binary into $(BINARY_DIRECTORY)"
+	@echo "  build        - Build the application binary into project root"
 	@echo "  test         - Run unit tests"
 	@echo "  test-cover   - Run unit tests with coverage"
 	@echo "  test-race    - Run unit tests with the race detector"

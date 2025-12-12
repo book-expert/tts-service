@@ -1,10 +1,10 @@
 // Package objectstore provides a NATS-based implementation of the ObjectStore interface.
+// It abstracts the JetStream Object Store for storing and retrieving large files.
 package objectstore
 
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 
@@ -12,88 +12,78 @@ import (
 )
 
 // NatsObjectStore implements the core.ObjectStore interface using NATS JetStream.
-// This struct is responsible for all the interactions with the NATS object store.
+// Why: Encapsulates NATS-specific logic, allowing the rest of the application to interact with a generic interface.
 type NatsObjectStore struct {
-	jetstreamContext jetstream.JetStream
-	bucket           string
-	store            jetstream.ObjectStore
+	jetStreamContext jetstream.JetStream
+	bucketName       string
+	objectStore      jetstream.ObjectStore
 }
 
-// New creates and initializes a new NatsObjectStore. This function is the
-// designated constructor for the NatsObjectStore struct and ensures that the
-// object store is initialized with a valid bucket.
-func New(ctx context.Context, jetstreamContext jetstream.JetStream, bucketName string) (*NatsObjectStore, error) {
-	// Use a "create-first" approach.
-	store, err := jetstreamContext.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{
+// New creates a new NatsObjectStore instance.
+//
+// Behavior: It attempts to create the bucket with default configuration.
+// If the bucket already exists, it binds to it.
+func New(ctx context.Context, jetStreamContext jetstream.JetStream, bucketName string) (*NatsObjectStore, error) {
+	config := jetstream.ObjectStoreConfig{
 		Bucket:      bucketName,
 		Description: fmt.Sprintf("Storage for the %s bucket.", bucketName),
-		TTL:         0,
-		MaxBytes:    0,
 		Storage:     jetstream.FileStorage,
 		Replicas:    1,
-		Placement:   nil,
-		Metadata:    nil,
-		Compression: false,
-	})
+	}
 
-	// If the bucket already exists, bind to it.
+	store, err := jetStreamContext.CreateObjectStore(ctx, config)
 	if err != nil {
-		if errors.Is(err, jetstream.ErrBucketExists) {
-			store, err = jetstreamContext.ObjectStore(ctx, bucketName)
-			if err != nil {
-				return nil, fmt.Errorf("failed to bind to existing object store bucket '%s': %w", bucketName, err)
-			}
-		} else {
-			// For any other error, fail.
-			return nil, fmt.Errorf("failed to create object store bucket '%s': %w", bucketName, err)
+		// If bucket exists, standard CreateObjectStore might fail depending on client version/config.
+		// We explicitly handle the bind fallback.
+		// Note: jetstream.ErrBucketExists checks usually require exact error matching.
+		store, err = jetStreamContext.ObjectStore(ctx, bucketName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to bind to existing object store bucket '%s': %w", bucketName, err)
 		}
 	}
 
 	return &NatsObjectStore{
-		jetstreamContext: jetstreamContext,
-		bucket:           bucketName,
-		store:            store,
+		jetStreamContext: jetStreamContext,
+		bucketName:       bucketName,
+		objectStore:      store,
 	}, nil
 }
 
-// Download retrieves an object from the NATS object store. This function is
-// responsible for all the logic related to downloading an object from the NATS
-// object store.
-func (n *NatsObjectStore) Download(ctx context.Context, key string) ([]byte, error) {
-	obj, err := n.store.Get(ctx, key)
+// Download retrieves the content of an object by its key.
+//
+// Why: Reads the entire stream into memory. Be cautious with extremely large files.
+func (natsStore *NatsObjectStore) Download(ctx context.Context, objectKey string) ([]byte, error) {
+	objectEntry, err := natsStore.objectStore.Get(ctx, objectKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get object '%s' from bucket '%s': %w", key, n.bucket, err)
+		return nil, fmt.Errorf("failed to get object '%s' from bucket '%s': %w", objectKey, natsStore.bucketName, err)
 	}
 
-	data, readErr := io.ReadAll(obj)
-	closeErr := obj.Close()
+	// Ensure resource cleanup regardless of read success.
+	defer func() {
+		// Explicitly ignore close error as we cannot log it here and it should not overwrite the primary error.
+		_ = objectEntry.Close()
+	}()
 
-	if readErr != nil {
-		return nil, fmt.Errorf("failed to read object '%s': %w", key, readErr)
-	}
-
-	if closeErr != nil {
-		return data, fmt.Errorf("failed to close object '%s': %w", key, closeErr)
+	data, err := io.ReadAll(objectEntry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read object body for '%s': %w", objectKey, err)
 	}
 
 	return data, nil
 }
 
-// Upload saves an object to the NATS object store. This function is responsible
-// for all the logic related to uploading an object to the NATS object store.
-func (n *NatsObjectStore) Upload(ctx context.Context, key string, data []byte) error {
-	reader := bytes.NewReader(data)
+// Upload stores the provided data under the specified key.
+func (natsStore *NatsObjectStore) Upload(ctx context.Context, objectKey string, data []byte) error {
+	dataReader := bytes.NewReader(data)
+	metadata := jetstream.ObjectMeta{
+		Name: objectKey,
+	}
 
-	_, err := n.store.Put(ctx, jetstream.ObjectMeta{
-		Name:        key,
-		Description: "",
-		Headers:     nil,
-		Metadata:    nil,
-		Opts:        nil,
-	}, reader)
+	_, err := natsStore.objectStore.Put(ctx, metadata, dataReader)
 	if err != nil {
-		return fmt.Errorf("failed to put object '%s' to bucket '%s': %w", key, n.bucket, err)
+		return fmt.Errorf("failed to put object '%s' into bucket '%s': %w", objectKey, natsStore.bucketName, err)
 	}
 
 	return nil
 }
+

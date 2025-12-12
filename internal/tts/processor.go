@@ -1,85 +1,221 @@
-// Package tts provides the implementation for the TTSProcessor interface.
+// Package tts implements the Text-To-Speech processing logic using Google's GenAI REST API.
+// It handles the interaction with the Gemini API to generate audio from text.
 package tts
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"strconv"
+	"io"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/core"
 )
 
-// ErrNotImplemented is returned when a method is not yet implemented.
-var ErrNotImplemented = errors.New("not yet implemented")
+const (
+	// ModalityAudio specifies that we want the model to generate audio output.
+	ModalityAudio = "AUDIO"
+)
 
-// ChatLLMProcessor implements the core.TTSProcessor interface by calling the
-// chatllm binary. This struct is responsible for all the interactions with the
-// chatllm binary.
-type ChatLLMProcessor struct {
-	config core.TTSConfig
-	log    *logger.Logger
+var (
+	// ErrEmptyText is returned when the input text is empty.
+	ErrEmptyText = errors.New("input text is empty")
+	// ErrVoiceUnspecified is returned when no voice is provided in config or defaults.
+	ErrVoiceUnspecified = errors.New("voice name must be specified either in config or as default")
+	// ErrEmptyResponse is returned when the API returns a success status but no content.
+	ErrEmptyResponse = errors.New("received empty content response from Gemini API")
+	// ErrNoAudioData is returned when the response content is missing the expected inline audio bytes.
+	ErrNoAudioData = errors.New("no audio inline data found in response part")
+)
+
+// GeminiProcessor implements the core.TTSProcessor interface using the Gemini REST API.
+type GeminiProcessor struct {
+	baseURL      string
+	apiKey       string
+	model        string
+	defaultVoice string
+	client       *http.Client
+	systemLogger *logger.Logger
 }
 
-// New creates a new ChatLLMProcessor. This function is the designated
-// constructor for the ChatLLMProcessor struct and ensures that the processor is
-// initialized with a valid configuration.
-func New(cfg core.TTSConfig, log *logger.Logger) (*ChatLLMProcessor, error) {
-	return &ChatLLMProcessor{
-		config: cfg,
-		log:    log,
+// Structs for JSON Payload
+
+type part struct {
+	Text string `json:"text"`
+}
+
+type content struct {
+	Parts []part `json:"parts"`
+}
+
+type prebuiltVoiceConfig struct {
+	VoiceName string `json:"voiceName"`
+}
+
+type voiceConfig struct {
+	PrebuiltVoiceConfig prebuiltVoiceConfig `json:"prebuiltVoiceConfig"`
+}
+
+type speechConfig struct {
+	VoiceConfig voiceConfig `json:"voiceConfig"`
+}
+
+type generationConfig struct {
+	ResponseModalities []string     `json:"responseModalities"`
+	SpeechConfig       speechConfig `json:"speechConfig"`
+}
+
+type generateRequest struct {
+	Contents         []content        `json:"contents"`
+	GenerationConfig generationConfig `json:"generationConfig"`
+	Model            string           `json:"model,omitempty"`
+}
+
+// Structs for JSON Response
+
+type inlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // Base64 encoded
+}
+
+type responsePart struct {
+	InlineData *inlineData `json:"inlineData,omitempty"`
+}
+
+type candidateContent struct {
+	Parts []responsePart `json:"parts"`
+}
+
+type candidate struct {
+	Content candidateContent `json:"content"`
+}
+
+type generateResponse struct {
+	Candidates []candidate `json:"candidates"`
+}
+
+// New creates a new GeminiProcessor instance.
+// Why: Encapsulates the client creation and ensures all required fields are initialized.
+func New(ctx context.Context, baseURL string, apiKey string, model string, defaultVoice string, systemLogger *logger.Logger) (*GeminiProcessor, error) {
+	if apiKey == "" {
+		return nil, errors.New("API key cannot be empty")
+	}
+	if baseURL == "" {
+		return nil, errors.New("base URL cannot be empty")
+	}
+
+	return &GeminiProcessor{
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		apiKey:       apiKey,
+		model:        model,
+		defaultVoice: defaultVoice,
+		client:       &http.Client{Timeout: 600 * time.Second}, // Generous timeout for audio generation
+		systemLogger: systemLogger,
 	}, nil
 }
 
-// GetConfig returns the TTS configuration. This function is a simple getter that
-// returns the configuration of the processor.
-func (p *ChatLLMProcessor) GetConfig() core.TTSConfig {
-	return p.config
-}
-
-// Process takes text and returns the raw audio data by calling the chatllm binary.
-// This function is the main entry point for the TTS processor and is responsible
-// for orchestrating the entire TTS generation process.
-func (p *ChatLLMProcessor) Process(ctx context.Context, text []byte, cfg core.TTSConfig) ([]byte, error) {
-	tempFile, err := os.CreateTemp("", "tts-output-*.pcm")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file for tts output: %w", err)
+// Process generates audio from the provided text using the configured model and voice.
+// Flow: Validate Input -> Resolve Voice -> Build Payload -> Call REST API -> Extract Audio
+func (processor *GeminiProcessor) Process(ctx context.Context, textBytes []byte, config core.TTSConfig) ([]byte, error) {
+	textInput := string(textBytes)
+	if strings.TrimSpace(textInput) == "" {
+		return nil, ErrEmptyText
 	}
 
+	voiceName, err := processor.resolveVoice(config.Voice)
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. Construct Request Payload
+	payload := generateRequest{
+		Contents: []content{
+			{
+				Parts: []part{
+					{Text: textInput},
+				},
+			},
+		},
+		GenerationConfig: generationConfig{
+			ResponseModalities: []string{ModalityAudio},
+			SpeechConfig: speechConfig{
+				VoiceConfig: voiceConfig{
+					PrebuiltVoiceConfig: prebuiltVoiceConfig{
+						VoiceName: voiceName,
+					},
+				},
+			},
+		},
+		Model: processor.model, // Including model in body as per user example
+	}
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	// 2. Create HTTP Request
+	// URL Pattern: https://<base>/v1beta/models/<model>:generateContent
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", processor.baseURL, processor.model)
+	
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", processor.apiKey)
+
+	// 3. Execute Request
+	processor.systemLogger.Infof("Sending TTS request to Gemini (%s) for voice %s...", processor.model, voiceName)
+	resp, err := processor.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("api request failed: %w", err)
+	}
 	defer func() {
-		removeErr := os.Remove(tempFile.Name())
-		if removeErr != nil {
-			p.log.Warn("Failed to remove temp file '%s': %v", tempFile.Name(), removeErr)
-		}
+		_ = resp.Body.Close()
 	}()
 
-	args := []string{
-		"-m", p.config.ModelPath,
-		"--snac_model", p.config.SnacModelPath,
-		"-p", fmt.Sprintf("{%s}: %s", cfg.Voice, string(text)),
-		"--tts_export", tempFile.Name(),
-		"--seed", strconv.Itoa(cfg.Seed),
-		"-ngl", strconv.Itoa(cfg.NGL),
-		"--top_p", fmt.Sprintf("%.2f", cfg.TopP),
-		"--repetition_penalty", fmt.Sprintf("%.2f", cfg.RepetitionPenalty),
-		"--temp", fmt.Sprintf("%.2f", cfg.Temperature),
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("api returned error status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// #nosec G204
-	cmd := exec.CommandContext(ctx, "chatllm", args...)
+	// 4. Parse Response
+	var genResp generateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
 
-	output, err := cmd.CombinedOutput()
+	// 5. Extract Audio
+	if len(genResp.Candidates) == 0 ||
+		len(genResp.Candidates[0].Content.Parts) == 0 ||
+		genResp.Candidates[0].Content.Parts[0].InlineData == nil {
+		return nil, ErrNoAudioData
+	}
+
+	base64Data := genResp.Candidates[0].Content.Parts[0].InlineData.Data
+	pcmData, err := base64.StdEncoding.DecodeString(base64Data)
 	if err != nil {
-		return nil, fmt.Errorf("chatllm binary execution failed: %w - output: %s", err, string(output))
+		return nil, fmt.Errorf("base64 decode failed: %w", err)
 	}
 
-	audioData, err := os.ReadFile(tempFile.Name())
-	if err != nil {
-		return nil, fmt.Errorf("failed to read audio data from temp file: %w", err)
-	}
+	return pcmData, nil
+}
 
-	return audioData, nil
+// resolveVoice determines which voice to use, falling back to default if necessary.
+func (processor *GeminiProcessor) resolveVoice(requestedVoice string) (string, error) {
+	if requestedVoice != "" {
+		return requestedVoice, nil
+	}
+	if processor.defaultVoice != "" {
+		return processor.defaultVoice, nil
+	}
+	return "", ErrVoiceUnspecified
 }

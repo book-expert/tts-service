@@ -1,16 +1,15 @@
-// main package for the tts-service
+// Package main serves as the entry point for the TTS Service.
+// It initializes configuration, logging, NATS connections, object stores, and the worker process.
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/book-expert/configurator"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/config"
 	"github.com/book-expert/tts-service/internal/core"
@@ -21,402 +20,200 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-var (
-	// ErrNoStreamsConfigured indicates that no streams were defined in ServiceNATS config.
-	ErrNoStreamsConfigured = errors.New("no streams configured for service")
-	// ErrNoConsumersConfigured indicates that no consumers were defined in ServiceNATS config.
-	ErrNoConsumersConfigured = errors.New("no consumers configured for service")
-	// ErrNoObjectStoresConfigured indicates that no object stores were defined in ServiceNATS config.
-	ErrNoObjectStoresConfigured = errors.New("no object stores configured for service")
-	// ErrDeadLetterSubjectEmpty indicates the DLQ subject is missing.
-	ErrDeadLetterSubjectEmpty = errors.New("dead letter subject must be configured")
-	// ErrInvalidConsumerConfig indicates the durable consumer entry is malformed.
-	ErrInvalidConsumerConfig = errors.New(
-		"invalid consumer configuration: stream, consumer, and filter subject must be set",
-	)
-	// ErrConsumerStreamNotFound indicates the referenced consumer stream is missing.
-	ErrConsumerStreamNotFound = errors.New("consumer stream not found in streams")
-	// ErrConsumerFilterMismatch indicates the consumer filter subject is not part of its stream.
-	ErrConsumerFilterMismatch = errors.New("consumer filter subject not present in referenced stream subjects")
-	// ErrPublishSubjectDerive indicates we could not derive a publish subject from configuration.
-	ErrPublishSubjectDerive = errors.New("publish subject could not be derived from streams configuration")
-	// ErrPublishSubjectUnknown indicates the derived publish subject is not present in any stream.
-	ErrPublishSubjectUnknown = errors.New("publish subject not found in any configured stream subjects")
-)
-
-func setupLogger(logPath string) (*logger.Logger, error) {
-	log, err := logger.New(logPath, "tts-service.log")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create logger: %w", err)
-	}
-
-	return log, nil
-}
-
-func bootstrap() (*config.Config, *logger.Logger, error) {
-	bootstrapLog, err := setupLogger(os.TempDir())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: Failed to create bootstrap logger: %v\n", err)
-
-		return nil, nil, err
-	}
-
-	bootstrapLog.Info("Bootstrap logger created.")
-
-	cfg, err := config.Load(bootstrapLog)
-	if err != nil {
-		bootstrapLog.Error("Failed to load configuration: %v", err)
-
-		return nil, nil, fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	bootstrapLog.Info("Configuration loaded successfully.")
-
-	return cfg, bootstrapLog, nil
-}
-
 const (
-	natsConnectTimeout = 30 * time.Second
-	natsStreamTimeout  = 60 * time.Second
+	// NatsConnectionTimeout defines the maximum duration to wait for a NATS connection.
+	NatsConnectionTimeout = 30 * time.Second
+
+	// ConfigFileName defines the standard name of the configuration file.
+	ConfigFileName = "project.toml"
+
+	// LogFileName defines the name of the log file.
+	LogFileName = "tts-service.log"
 )
 
-func setupNATS(cfg *config.Config) (*nats.Conn, error) {
-	natsConnection, err := nats.Connect(cfg.ServiceConfig.NATS.NATS.URL,
-		nats.Timeout(natsConnectTimeout),
-		nats.RetryOnFailedConnect(true))
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
-	}
-
-	return natsConnection, nil
-}
-
-
-
-// streamNameForSubject removed; explicit stream names come from configuration.
-
-func createTTSProcessor(cfg *config.Config, log *logger.Logger) (*tts.ChatLLMProcessor, error) {
-	processor, err := tts.New(core.TTSConfig{
-		ModelPath:         cfg.TTS.ModelPath,
-		SnacModelPath:     cfg.TTS.SnacModelPath,
-		Voice:             cfg.TTS.Voice,
-		Seed:              cfg.TTS.Seed,
-		NGL:               cfg.TTS.NGL,
-		TopP:              cfg.TTS.TopP,
-		RepetitionPenalty: cfg.TTS.RepetitionPenalty,
-		Temperature:       cfg.TTS.Temperature,
-		AllowedVoices:     cfg.TTS.AllowedVoices,
-	}, log)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create TTS processor: %w", err)
-	}
-
-	return processor, nil
-}
-
-func verifyJetStreamAvailable(ctx context.Context, jetstreamContext jetstream.JetStream) error {
-	_, jsInfoErr := jetstreamContext.AccountInfo(ctx)
-	if jsInfoErr != nil {
-		return fmt.Errorf("jetstream not available or unresponsive: %w", jsInfoErr)
-	}
-
-	return nil
-}
-
-
-
-func initStoresAndProcessor(
-	ctx context.Context,
-	jetstreamContext jetstream.JetStream,
-	cfg *config.Config,
-	log *logger.Logger,
-) (*objectstore.NatsObjectStore, *tts.ChatLLMProcessor, error) {
-	bucket := deriveFirstObjectStoreBucket(&cfg.ServiceConfig.NATS)
-
-	store, storeErr := objectstore.New(ctx, jetstreamContext, bucket)
-	if storeErr != nil {
-		return nil, nil, fmt.Errorf("failed to create object store: %w", storeErr)
-	}
-
-	processor, procErr := createTTSProcessor(cfg, log)
-	if procErr != nil {
-		return nil, nil, procErr
-	}
-
-	return store, processor, nil
-}
-
-func deriveFirstObjectStoreBucket(nc *configurator.ServiceNATSConfig) string {
-	if len(nc.ObjectStores) > 0 {
-		return nc.ObjectStores[0].BucketName
-	}
-
-	return ""
-}
-
-func derivePublishStreamAndSubject(nc *configurator.ServiceNATSConfig) (string, string) {
-	if len(nc.Streams) > 0 {
-		stream := nc.Streams[0]
-		if len(stream.Subjects) > 0 {
-			return stream.Name, stream.Subjects[0]
-		}
-
-		return stream.Name, ""
-	}
-
-	return "", ""
-}
-
-func launchWorker(
-	ctx context.Context,
-	natsConnection *nats.Conn,
-	jetstreamContext jetstream.JetStream,
-	cfg *config.Config,
-	store core.ObjectStore,
-	processor core.TTSProcessor,
-	log *logger.Logger,
-) (context.CancelFunc, error) {
-	consumerStream, consumerSubject, consumerName := deriveConsumerBinding(&cfg.ServiceConfig.NATS)
-	publishStream, publishSubject := derivePublishStreamAndSubject(&cfg.ServiceConfig.NATS)
-
-	_ = publishStream // stream name is used for ensuring stream only
-
-	natsWorker, workerErr := worker.NewNatsWorker(
-		natsConnection,
-		jetstreamContext,
-		jetstreamContext,
-		consumerStream,
-		consumerSubject,
-		consumerName,
-		publishSubject,
-		cfg.TTS.DeadLetterSubject,
-		store,
-		processor,
-		log,
-	)
-	if workerErr != nil {
-		return nil, fmt.Errorf("failed to create NATS worker: %w", workerErr)
-	}
-
-	workerCtx, workerCancel := context.WithCancel(ctx)
-
-	go func() {
-		defer natsConnection.Close()
-
-		runErr := natsWorker.Run(workerCtx)
-		if runErr != nil {
-			log.Error("NATS worker stopped with error: %v", runErr)
-			workerCancel()
-		}
-	}()
-
-	_, consumerSubject, _ = deriveConsumerBinding(&cfg.ServiceConfig.NATS)
-	log.System("TTS-Service successfully initialized. Listening for jobs on subject: %s", consumerSubject)
-
-	return workerCancel, nil
-}
-
-func deriveConsumerBinding(nc *configurator.ServiceNATSConfig) (string, string, string) {
-	if len(nc.Consumers) > 0 {
-		c := nc.Consumers[0]
-
-		return c.StreamName, c.FilterSubject, c.ConsumerName
-	}
-
-	return "", "", ""
-}
-
-func startWorker(ctx context.Context, cfg *config.Config, log *logger.Logger) (context.CancelFunc, error) {
-	validateErr := validateServiceNATSConfig(cfg)
-	if validateErr != nil {
-		return nil, validateErr
-	}
-
-	natsConnection, err := setupNATS(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	jetstreamContext, jsErr := jetstream.New(natsConnection)
-	if jsErr != nil {
-		natsConnection.Close()
-
-		return nil, fmt.Errorf("failed to get JetStream context: %w", jsErr)
-	}
-
-	verifyErr := verifyJetStreamAvailable(ctx, jetstreamContext)
-	if verifyErr != nil {
-		natsConnection.Close()
-
-		return nil, verifyErr
-	}
-
-	err = configurator.CreateOrUpdateStreams(ctx, jetstreamContext, cfg.ServiceConfig.NATS.Streams)
-	if err != nil {
-		natsConnection.Close()
-		return nil, fmt.Errorf("failed to create or update streams: %w", err)
-	}
-
-	store, processor, initErr := initStoresAndProcessor(ctx, jetstreamContext, cfg, log)
-	if initErr != nil {
-		natsConnection.Close()
-
-		return nil, initErr
-	}
-
-	workerCancel, launchErr := launchWorker(ctx, natsConnection, jetstreamContext, cfg, store, processor, log)
-	if launchErr != nil {
-		natsConnection.Close()
-
-		return nil, launchErr
-	}
-
-	return workerCancel, nil
-}
-
-// validateServiceNATSConfig performs fast-fail validation of the tts-service NATS configuration.
-// It ensures the presence and cross-consistency of streams, consumer, object stores, and DLQ subject.
-func validateServiceNATSConfig(cfg *config.Config) error {
-	basicErr := validateDLQAndBasics(cfg)
-	if basicErr != nil {
-		return basicErr
-	}
-
-	consumerErr := validateConsumerCrossReference(&cfg.ServiceConfig.NATS)
-	if consumerErr != nil {
-		return consumerErr
-	}
-
-	publishErr := validatePublishSubjectExists(&cfg.ServiceConfig.NATS)
-	if publishErr != nil {
-		return publishErr
-	}
-
-	return nil
-}
-
-func validateDLQAndBasics(cfg *config.Config) error {
-	if cfg.TTS.DeadLetterSubject == "" {
-		return ErrDeadLetterSubjectEmpty
-	}
-
-	serviceNATS := &cfg.ServiceConfig.NATS
-	if len(serviceNATS.Streams) == 0 {
-		return ErrNoStreamsConfigured
-	}
-
-	if len(serviceNATS.Consumers) == 0 {
-		return ErrNoConsumersConfigured
-	}
-
-	if len(serviceNATS.ObjectStores) == 0 || serviceNATS.ObjectStores[0].BucketName == "" {
-		return ErrNoObjectStoresConfigured
-	}
-
-	return nil
-}
-
-func validateConsumerCrossReference(serviceNATS *configurator.ServiceNATSConfig) error {
-	consumer := serviceNATS.Consumers[0]
-	if consumer.StreamName == "" || consumer.ConsumerName == "" || consumer.FilterSubject == "" {
-		return ErrInvalidConsumerConfig
-	}
-
-	var matchedStream *configurator.StreamConfig
-
-	for i := range serviceNATS.Streams {
-		if serviceNATS.Streams[i].Name == consumer.StreamName {
-			matchedStream = &serviceNATS.Streams[i]
-
-			break
-		}
-	}
-
-	if matchedStream == nil {
-		return ErrConsumerStreamNotFound
-	}
-
-	if !subjectInList(consumer.FilterSubject, matchedStream.Subjects) {
-		return ErrConsumerFilterMismatch
-	}
-
-	return nil
-}
-
-func validatePublishSubjectExists(serviceNATS *configurator.ServiceNATSConfig) error {
-	_, publishSubject := derivePublishStreamAndSubject(serviceNATS)
-	if publishSubject == "" {
-		return ErrPublishSubjectDerive
-	}
-
-	for _, s := range serviceNATS.Streams {
-		if subjectInList(publishSubject, s.Subjects) {
-			return nil
-		}
-	}
-
-	return ErrPublishSubjectUnknown
-}
-
-func subjectInList(needle string, haystack []string) bool {
-	for _, candidate := range haystack {
-		if candidate == needle {
-			return true
-		}
-	}
-
-	return false
-}
-
-func waitForShutdownSignal(log *logger.Logger) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-	log.Info("Shutdown signal received, gracefully shutting down...")
-}
-
-func run() error {
-	cfg, bootstrapLog, err := bootstrap()
-	if err != nil {
-		return err
-	}
-
-	log, err := setupLogger(os.TempDir())
-	if err != nil {
-		bootstrapLog.Error("Failed to create final logger: %v", err)
-
-		return fmt.Errorf("failed to create final logger: %w", err)
-	}
-
-	defer func() {
-		closeErr := log.Close()
-		if closeErr != nil {
-			fmt.Fprintf(os.Stderr, "error closing logger: %v\n", closeErr)
-		}
-	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	workerCancel, err := startWorker(ctx, cfg, log)
-	if err != nil {
-		log.Error("Failed to start worker: %v", err)
-
-		return err
-	}
-
-	waitForShutdownSignal(log)
-	workerCancel()
-
-	log.Info("Shutdown complete.")
-
-	return nil
+// Application holds the dependencies and state of the running service.
+// Why: Centralizes state management and allows for clean dependency injection and cleanup.
+type Application struct {
+	configuration    *config.Config
+	logger           *logger.Logger
+	natsConnection   *nats.Conn
+	jetStreamContext jetstream.JetStream
+	workerInstance   *worker.NatsWorker
 }
 
 func main() {
-	err := run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Service exited with error: %v\n", err)
+	// Create a context that listens for system interruption signals.
+	signalContext, cancelSignalContext := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancelSignalContext()
+
+	if runError := runService(signalContext); runError != nil {
+		fmt.Fprintf(os.Stderr, "Service exited with fatal error: %v\n", runError)
 		os.Exit(1)
 	}
+}
+
+// runService orchestrates the startup, execution, and shutdown of the application.
+func runService(serviceContext context.Context) error {
+	// 1. Initialize Application
+	serviceApplication, initializationError := newApplication()
+	if initializationError != nil {
+		return initializationError
+	}
+	defer serviceApplication.cleanup()
+
+	serviceApplication.logger.Systemf("TTS Service initialization complete. Starting worker message loop...")
+
+	// 2. Run Worker
+	// This blocks until the context is canceled or a fatal error occurs.
+	return serviceApplication.workerInstance.Run(serviceContext)
+}
+
+// newApplication initializes all service dependencies.
+//
+// Flow: Load Config -> Init Logger -> Connect NATS -> Bind Stores -> Init TTS -> Create Worker
+func newApplication() (*Application, error) {
+	// 1. Load Configuration
+	serviceConfig, configLoadError := config.Load(ConfigFileName)
+	if configLoadError != nil {
+		return nil, fmt.Errorf("failed to load service configuration: %w", configLoadError)
+	}
+
+	// 2. Initialize Logger
+	systemLogger, loggerInitError := logger.New(serviceConfig.Service.LogDirectory, LogFileName)
+	if loggerInitError != nil {
+		return nil, fmt.Errorf("failed to initialize logger: %w", loggerInitError)
+	}
+	systemLogger.Infof("Starting TTS Service. Configuration loaded. Worker count: %d", serviceConfig.Service.WorkerCount)
+
+	// 3. Connect to NATS
+	natsConnection, jetStreamContext, natsConnectError := setupNatsConnection(serviceConfig)
+	if natsConnectError != nil {
+		// Attempt to close logger before returning since defer in runService won't run yet
+		_ = systemLogger.Close()
+		return nil, fmt.Errorf("failed to establish NATS infrastructure connection: %w", natsConnectError)
+	}
+
+	// 4. Bind Object Stores
+	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(context.Background(), jetStreamContext, serviceConfig)
+	if objectStoreBindError != nil {
+		natsConnection.Close()
+		_ = systemLogger.Close()
+		return nil, fmt.Errorf("failed to bind to required Object Stores: %w", objectStoreBindError)
+	}
+
+	// 5. Initialize Key-Value Store
+	progressKeyValueStore, kvStoreInitError := setupProgressStore(context.Background(), jetStreamContext, serviceConfig)
+	if kvStoreInitError != nil {
+		natsConnection.Close()
+		_ = systemLogger.Close()
+		return nil, fmt.Errorf("failed to initialize Progress Key-Value Store: %w", kvStoreInitError)
+	}
+
+	// 6. Initialize TTS Processor
+	ttsAPIKey := os.Getenv(serviceConfig.TTS.APIKeyEnvironmentVariable)
+	if ttsAPIKey == "" {
+		natsConnection.Close()
+		_ = systemLogger.Close()
+		return nil, fmt.Errorf("mandatory environment variable '%s' is missing", serviceConfig.TTS.APIKeyEnvironmentVariable)
+	}
+
+	ttsProcessor, ttsInitError := tts.New(context.Background(), serviceConfig.TTS.BaseURL, ttsAPIKey, serviceConfig.TTS.Model, serviceConfig.TTS.VoiceName, systemLogger)
+	if ttsInitError != nil {
+		natsConnection.Close()
+		_ = systemLogger.Close()
+		return nil, fmt.Errorf("failed to initialize TTS Processor: %w", ttsInitError)
+	}
+
+	// 7. Create Worker
+	natsWorker, workerInitError := worker.NewNatsWorker(
+		natsConnection,
+		jetStreamContext,
+		jetStreamContext, // Passed twice as ConsumerContext and PublisherContext (based on original code signature)
+		serviceConfig.NATS.Consumer.StreamName,
+		serviceConfig.NATS.Consumer.SubjectFilter,
+		serviceConfig.NATS.Consumer.DurableName,
+		serviceConfig.NATS.Producer.SubjectName,
+		serviceConfig.NATS.DeadLetterQueueSubject,
+		textObjectStore,
+		ttsObjectStore,
+		progressKeyValueStore,
+		ttsProcessor,
+		systemLogger,
+		serviceConfig.Service.WorkerCount,
+		serviceConfig.TTS.RequestsPerMinute,
+	)
+	if workerInitError != nil {
+		natsConnection.Close()
+		_ = systemLogger.Close()
+		return nil, fmt.Errorf("failed to create NATS worker instance: %w", workerInitError)
+	}
+
+	return &Application{
+		configuration:    serviceConfig,
+		logger:           systemLogger,
+		natsConnection:   natsConnection,
+		jetStreamContext: jetStreamContext,
+		workerInstance:   natsWorker,
+	}, nil
+}
+
+// cleanup ensures resources are released properly on shutdown.
+func (serviceApplication *Application) cleanup() {
+	if serviceApplication.natsConnection != nil {
+		serviceApplication.natsConnection.Close()
+	}
+	if serviceApplication.logger != nil {
+		if closeError := serviceApplication.logger.Close(); closeError != nil {
+			fmt.Fprintf(os.Stderr, "failed to close logger cleanly: %v\n", closeError)
+		}
+	}
+}
+
+// setupNatsConnection establishes the NATS connection and initializes the JetStream context.
+func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.JetStream, error) {
+	natsConnection, connectionError := nats.Connect(configuration.NATS.URL, nats.Timeout(NatsConnectionTimeout))
+	if connectionError != nil {
+		return nil, nil, fmt.Errorf("nats connect failed: %w", connectionError)
+	}
+
+	jetStreamContext, jetStreamError := jetstream.New(natsConnection)
+	if jetStreamError != nil {
+		natsConnection.Close()
+		return nil, nil, fmt.Errorf("jetstream initialization failed: %w", jetStreamError)
+	}
+
+	return natsConnection, jetStreamContext, nil
+}
+
+// setupObjectStores binds to the necessary JetStream Object Stores.
+func setupObjectStores(serviceContext context.Context, jetStreamContext jetstream.JetStream, configuration *config.Config) (core.ObjectStore, core.ObjectStore, error) {
+	textStore, textStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TextBucketName)
+	if textStoreError != nil {
+		return nil, nil, fmt.Errorf("failed to bind to Text Object Store (%s): %w", configuration.NATS.ObjectStore.TextBucketName, textStoreError)
+	}
+
+	ttsStore, ttsStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TTSBucketName)
+	if ttsStoreError != nil {
+		return nil, nil, fmt.Errorf("failed to bind to TTS Object Store (%s): %w", configuration.NATS.ObjectStore.TTSBucketName, ttsStoreError)
+	}
+
+	return textStore, ttsStore, nil
+}
+
+// setupProgressStore initializes or retrieves the Key-Value bucket for tracking progress.
+func setupProgressStore(serviceContext context.Context, jetStreamContext jetstream.JetStream, configuration *config.Config) (jetstream.KeyValue, error) {
+	// Attempt to create the bucket. Use CreateKeyValue as it is generally idempotent.
+	keyValueStore, createError := jetStreamContext.CreateKeyValue(serviceContext, jetstream.KeyValueConfig{
+		Bucket: configuration.NATS.KeyValueStore.ProgressBucketName,
+	})
+	if createError != nil {
+		// Fallback: Attempt to bind to an existing bucket if creation reported an error
+		// (though standard NATS clients handle existing buckets gracefully in Create).
+		var bindError error
+		keyValueStore, bindError = jetStreamContext.KeyValue(serviceContext, configuration.NATS.KeyValueStore.ProgressBucketName)
+		if bindError != nil {
+			return nil, fmt.Errorf("failed to get or create KV bucket %s. Create error: %v, Bind error: %w", configuration.NATS.KeyValueStore.ProgressBucketName, createError, bindError)
+		}
+	}
+	return keyValueStore, nil
 }

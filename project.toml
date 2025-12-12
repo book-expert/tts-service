@@ -1,0 +1,30 @@
+[service]
+log_dir = "./logs"
+workers = 10
+
+[tts]
+api_key_variable = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com"
+model = "gemini-2.5-flash-preview-tts"
+voice_name = "Kore"
+requests_per_minute = 10
+
+[nats]
+url = "nats://192.168.122.102:4222"
+dlq_subject = "tts.dlq"
+
+[nats.consumer]
+stream = "TEXTS"
+subject = "texts.processed"
+durable = "tts-service-durable"
+
+[nats.producer]
+stream = "TTS"
+subject = "tts.result"
+
+[nats.object_store]
+text_bucket = "TEXT_FILES"
+tts_bucket = "TTS_FILES"
+
+[nats.kv]
+progress_bucket = "TTS_PROGRESS"
