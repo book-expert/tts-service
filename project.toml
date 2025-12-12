@@ -1,8 +1,8 @@
 [service]
-workers = 2
+workers = 5
 
 [tts]
-requests_per_minute = 2
+requests_per_minute = 5
 
 [nats]
 url = "nats://192.168.122.102:4222"

@@ -116,7 +116,7 @@ func New(ctx context.Context, baseURL string, apiKey string, model string, defau
 		apiKey:       apiKey,
 		model:        model,
 		defaultVoice: defaultVoice,
-		client:       &http.Client{Timeout: 600 * time.Second}, // Generous timeout for audio generation
+		client:       &http.Client{Timeout: 900 * time.Second}, // Generous timeout for audio generation
 		systemLogger: systemLogger,
 	}, nil
 }
