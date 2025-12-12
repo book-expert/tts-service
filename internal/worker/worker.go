@@ -286,7 +286,11 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 	}
 
 	// 2. Generate Audio
-	ttsConfiguration := core.TTSConfig{Voice: event.Voice}
+	stylePrompt := buildStylePrompt(event.Settings)
+	ttsConfiguration := core.TTSConfig{
+		Voice:       event.Voice,
+		StylePrompt: stylePrompt,
+	}
 	pcmAudioData, err := worker.ttsProcessor.Process(ctx, cleanText, ttsConfiguration)
 	if err != nil {
 		return fmt.Errorf("TTS generation failed: %w", err)

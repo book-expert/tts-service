@@ -128,6 +128,12 @@ func (processor *GeminiProcessor) Process(ctx context.Context, textBytes []byte,
 		return nil, ErrEmptyText
 	}
 
+	// Prepend the style prompt to the text content if provided.
+	// This "steers" the model's delivery.
+	if config.StylePrompt != "" {
+		textInput = fmt.Sprintf("%s: %s", config.StylePrompt, textInput)
+	}
+
 	voiceName, err := processor.resolveVoice(config.Voice)
 	if err != nil {
 		return nil, err

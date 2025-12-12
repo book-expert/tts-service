@@ -10,7 +10,8 @@ type ObjectStore interface {
 
 // TTSConfig holds configuration for a specific TTS request.
 type TTSConfig struct {
-	Voice string
+	Voice       string
+	StylePrompt string
 }
 
 // TTSProcessor defines the interface for text-to-speech processing.
