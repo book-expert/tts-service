@@ -11,6 +11,7 @@ type ObjectStore interface {
 // TTSConfig holds configuration for a specific TTS request.
 type TTSConfig struct {
 	Voice       string
+	Language    string
 	StylePrompt string
 }
 

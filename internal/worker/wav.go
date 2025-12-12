@@ -59,3 +59,61 @@ func withWAVHeader(pcmData []byte, sampleRate int, channelCount int, bitsPerSamp
 	return append(header, pcmData...)
 }
 
+// normalizeAudio applies peak normalization to the 16-bit PCM data.
+// It scales the audio amplitude so the loudest peak reaches a near-maximum level (-0.5dB approx),
+// ensuring consistent volume across different generations.
+func normalizeAudio(pcmData []byte) []byte {
+	if len(pcmData) == 0 {
+		return pcmData
+	}
+
+	// 1. Convert bytes to int16 samples
+	sampleCount := len(pcmData) / 2
+	samples := make([]int16, sampleCount)
+	for i := 0; i < sampleCount; i++ {
+		samples[i] = int16(binary.LittleEndian.Uint16(pcmData[i*2:]))
+	}
+
+	// 2. Find the absolute peak value
+	var maxVal int16
+	for _, s := range samples {
+		absS := s
+		if s < 0 {
+			absS = -s
+		}
+		if absS > maxVal {
+			maxVal = absS
+		}
+	}
+
+	// If silence, return original
+	if maxVal == 0 {
+		return pcmData
+	}
+
+	// 3. Calculate scaling factor
+	// Target 32000 (out of 32767) to be safe (~97% or -0.2dB)
+	const targetPeak = 32000
+	scale := float64(targetPeak) / float64(maxVal)
+
+	// If already loud enough (or louder/clipped), don't scale down aggressively unless clipped
+	// But normalization usually implies bringing UP quiet audio.
+	// If scale < 1.0 (audio is clipped), we should scale down.
+	// If scale > 1.0 (audio is quiet), we scale up.
+
+	// 4. Apply scaling
+	normalized := make([]byte, len(pcmData))
+	for i := 0; i < sampleCount; i++ {
+		val := float64(samples[i]) * scale
+		// Clamp just in case float math overshoots
+		if val > 32767 {
+			val = 32767
+		} else if val < -32768 {
+			val = -32768
+		}
+		binary.LittleEndian.PutUint16(normalized[i*2:], uint16(int16(val)))
+	}
+
+	return normalized
+}
+

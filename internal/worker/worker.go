@@ -289,6 +289,7 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 	stylePrompt := buildStylePrompt(event.Settings)
 	ttsConfiguration := core.TTSConfig{
 		Voice:       event.Voice,
+		Language:    event.Settings.Language,
 		StylePrompt: stylePrompt,
 	}
 	pcmAudioData, err := worker.ttsProcessor.Process(ctx, cleanText, ttsConfiguration)
@@ -392,8 +393,11 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 		aggregatedPCMData = append(aggregatedPCMData, chunkData...)
 	}
 
+	// Normalize the aggregated audio to ensure consistent volume (-0.2dB peak)
+	normalizedPCMData := normalizeAudio(aggregatedPCMData)
+
 	// Calling the function located in wav.go
-	finalWavData := withWAVHeader(aggregatedPCMData, AudioSampleRateHz, AudioChannelsMono, AudioBitsPerSample)
+	finalWavData := withWAVHeader(normalizedPCMData, AudioSampleRateHz, AudioChannelsMono, AudioBitsPerSample)
 	finalKey := fmt.Sprintf(FinalAudioKeyFormat, workflowID)
 
 	if err := worker.audioObjectStore.Upload(ctx, finalKey, finalWavData); err != nil {

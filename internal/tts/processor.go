@@ -63,7 +63,8 @@ type voiceConfig struct {
 }
 
 type speechConfig struct {
-	VoiceConfig voiceConfig `json:"voiceConfig"`
+	VoiceConfig  voiceConfig `json:"voiceConfig"`
+	LanguageCode string      `json:"languageCode,omitempty"`
 }
 
 type generationConfig struct {
@@ -156,6 +157,7 @@ func (processor *GeminiProcessor) Process(ctx context.Context, textBytes []byte,
 						VoiceName: voiceName,
 					},
 				},
+				LanguageCode: config.Language,
 			},
 		},
 		Model: processor.model, // Including model in body as per user example
