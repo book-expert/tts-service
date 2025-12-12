@@ -1,9 +1,13 @@
 [service]
 log_dir = "./logs"
-workers = 5
+workers = 10
 
 [tts]
-requests_per_minute = 5
+requests_per_minute = 10
+api_key_variable = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com"
+model = "gemini-2.5-flash-preview-tts"
+voice_name = "Puck"
 
 [nats]
 url = "nats://192.168.122.102:4222"

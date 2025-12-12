@@ -32,6 +32,18 @@ model = "gemini-2.5-flash-preview-tts"
 make run
 ```
 
+## Development
+
+To build the service:
+```bash
+make build
+```
+
+To run linting:
+```bash
+make lint
+```
+
 ## Dependencies
 
 -   Go 1.25+
