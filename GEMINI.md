@@ -9,11 +9,11 @@ This service converts extracted text (Director's Scripts) into speech using Goog
 2.  **Processing**:
     -   Downloads text from Object Store (`TEXT_FILES`).
     -   **Pass-Through**: The text is already a fully formatted "Director's Script" (containing `# AUDIO PROFILE`, etc.). It is passed directly to the TTS API.
-    -   **Gemini TTS API**: Generates high-quality audio based on the script and `JobSettings` (Voice).
+    -   **Gemini TTS API**: Generates high-quality **48kHz Mono WAV** audio based on the script and `JobSettings` (Voice).
     -   Stores audio chunk in Object Store (`AUDIO_FILES`).
     -   **Aggregation**: When the last page is done:
         -   Concatenates all audio chunks.
-        -   **Normalization**: Applies peak normalization (-0.2dB).
+        -   **No Normalization**: Raw model output is preserved for maximum fidelity.
         -   Uploads final `.wav` file (`TTS_FILES`).
 3.  **Output**: Publishes completion event.
 

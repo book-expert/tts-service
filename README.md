@@ -11,6 +11,7 @@ This service consumes `texts.processed` events, extracts text from the NATS Obje
 -   **High Concurrency**: Supports parallel processing of multiple text pages.
 -   **Rate Limiting**: Built-in 10 RPM rate limiter to respect API quotas (prevents 429 errors).
 -   **Aggregation**: Automatically aggregates audio chunks into a single WAV file upon workflow completion.
+-   **High-Quality Resampling**: Uses FFmpeg to upsample 24kHz raw PCM from Gemini to 48kHz WAV using the SoX resampler for maximum fidelity.
 -   **Robustness**: Handles long-running requests with configurable timeouts and retries.
 
 ## Configuration

@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +35,7 @@ const (
 	DeadLetterQueueBackoffDuration = 2 * time.Second
 
 	// AudioSampleRateHz is the standard sample rate for the generated WAV audio.
+	// Gemini default is typically 24kHz. We set this to 24000 to match the source.
 	AudioSampleRateHz = 24000
 
 	// AudioChannelsMono indicates single-channel audio.
@@ -294,9 +299,19 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 		StylePrompt: "", // Style is embedded in the text headers
 	}
 	
-	pcmAudioData, err := worker.ttsProcessor.Process(ctx, cleanText, ttsConfiguration)
-	if err != nil {
-		return fmt.Errorf("TTS generation failed: %w", err)
+	var pcmAudioData []byte
+	
+	// Check for the [NO_SPEECH] marker (handling potential whitespace or surrounding text if model was chatty)
+	if strings.Contains(string(cleanText), "[NO_SPEECH]") {
+		worker.systemLogger.Infof("Skipping TTS for Page %d (Marked as [NO_SPEECH]). Using 1s silence.", event.PageNumber)
+		// Create 1 second of silence: SampleRate * 1 channel * 2 bytes (16-bit)
+		pcmAudioData = make([]byte, AudioSampleRateHz*2)
+	} else {
+		var err error
+		pcmAudioData, err = worker.ttsProcessor.Process(ctx, cleanText, ttsConfiguration)
+		if err != nil {
+			return fmt.Errorf("TTS generation failed: %w", err)
+		}
 	}
 
 	// 3. Store Audio Chunk
@@ -395,11 +410,52 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 		aggregatedPCMData = append(aggregatedPCMData, chunkData...)
 	}
 
-	// Normalize the aggregated audio to ensure consistent volume (-0.2dB peak)
-	normalizedPCMData := normalizeAudio(aggregatedPCMData)
+	// Create temp directory for processing
+	tmpDir, err := os.MkdirTemp("", "tts-aggregate")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	// Calling the function located in wav.go
-	finalWavData := withWAVHeader(normalizedPCMData, AudioSampleRateHz, AudioChannelsMono, AudioBitsPerSample)
+	pcmPath := filepath.Join(tmpDir, "raw.pcm")
+	wavPath := filepath.Join(tmpDir, "final.wav")
+
+	// Write raw PCM to file
+	if err := os.WriteFile(pcmPath, aggregatedPCMData, 0644); err != nil {
+		return fmt.Errorf("write pcm file: %w", err)
+	}
+
+	// Use FFmpeg to convert raw PCM (24kHz) to WAV (48kHz) with high-quality resampling
+	// -f s16le: Input format (Signed 16-bit Little Endian)
+	// -ar 24000: Input Sample Rate
+	// -ac 1: Input Channels
+	// -c:a pcm_s16le: Output Codec (keep it standard WAV)
+	// -af aresample=resampler=soxr: Use the SoX Resampler library for high-quality upsampling
+	// -ar 48000: Output Sample Rate
+	cmd := exec.Command("ffmpeg",
+		"-f", "s16le",
+		"-ar", fmt.Sprintf("%d", AudioSampleRateHz),
+		"-ac", fmt.Sprintf("%d", AudioChannelsMono),
+		"-i", pcmPath,
+		"-c:a", "pcm_s16le",
+		"-af", "aresample=resampler=soxr", 
+		"-ar", "48000",
+		"-y",
+		wavPath,
+	)
+
+	// Capture output for debugging in case of failure
+	if output, err := cmd.CombinedOutput(); err != nil {
+		worker.systemLogger.Errorf("FFmpeg output: %s", string(output))
+		return fmt.Errorf("ffmpeg conversion failed: %w", err)
+	}
+
+	// Read the generated WAV file
+	finalWavData, err := os.ReadFile(wavPath)
+	if err != nil {
+		return fmt.Errorf("read final wav: %w", err)
+	}
+
 	finalKey := fmt.Sprintf(FinalAudioKeyFormat, workflowID)
 
 	if err := worker.audioObjectStore.Upload(ctx, finalKey, finalWavData); err != nil {

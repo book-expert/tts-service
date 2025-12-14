@@ -1,9 +1,9 @@
 [service]
 log_dir = "./logs"
-workers = 10
+workers = 2
 
 [tts]
-requests_per_minute = 10
+requests_per_minute = 5
 api_key_variable = "GEMINI_API_KEY"
 base_url = "https://generativelanguage.googleapis.com"
 model = "gemini-2.5-flash-preview-tts"
