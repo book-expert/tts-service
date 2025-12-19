@@ -8,13 +8,16 @@ This service consumes `texts.processed` events and coordinates with the **Audio 
 
 1.  **Speech Generation**: Sends text chunks to the `audio-server` (VoxCPM model) to generate voice clones.
 2.  **Music Generation**: Requests ambient music loops from the `audio-server` (Lyria model) based on the "Music Prompt" derived from the content.
-3.  **Mixing**: Uses FFmpeg to mix the speech with the generated music loop, applying auto-ducking (volume reduction) during speech.
-4.  **Aggregation**: Stitches all page audio files into a final audiobook chapter.
+3.  **Mixing**: Uses FFmpeg to mix the speech with the generated music loop.
+    -   **Boosting**: Speech is boosted (1.5x) to cut through the mix.
+    -   **Looping**: Music (0.15x volume) is looped seamlessly to match speech duration.
+4.  **Aggregation**: Stitches all chunks into a final page audio file.
 
 ## Architecture
 
--   **Sequential Page Processing**: Processes one page at a time to maintain order and resource sanity.
--   **Bounded Chunk Parallelism**: Processes text chunks (paragraphs) within a page in parallel (Max 2 concurrent requests) to optimize speed without overloading the GPU.
+-   **Sequential Page Processing**: Processes one page at a time to maintain strict audiobook order.
+-   **Smart Chunking**: Splits text into paragraphs and processes them in parallel (Max 2 concurrent workers) to optimize GPU usage.
+-   **Guaranteed Ordering**: Re-assembles asynchronous chunks strictly by index before concatenation.
 -   **Hybrid Audio**: Combines 48kHz speech (VoxCPM) with 48kHz stereo music (Lyria).
 
 ## Configuration
@@ -23,7 +26,7 @@ Configuration is managed via `project.toml`:
 
 ```toml
 [service]
-workers = 1 # Strictly 1 to process pages in order
+workers = 2 # Limits concurrent chunks sent to Audio Server
 
 [tts]
 requests_per_minute = 60
@@ -55,3 +58,7 @@ make lint
 -   NATS Server
 -   FFmpeg (for mixing and concatenation)
 -   **Audio Server** (running locally or reachable via NATS)
+
+## License
+
+MIT
