@@ -32,9 +32,6 @@ type TTSSettings struct {
 	// Why: Storing the variable name rather than the key itself prevents secrets from being committed to source control.
 	APIKeyEnvironmentVariable string `toml:"api_key_variable"`
 	BaseURL                   string `toml:"base_url"`
-	Model                     string `toml:"model"`
-	VoiceName                 string `toml:"voice_name"`
-	RequestsPerMinute         int    `toml:"requests_per_minute"`
 }
 
 // NATSSettings holds all NATS-related configuration including connection, streams, and buckets.

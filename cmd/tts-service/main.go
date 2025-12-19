@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/book-expert/logger"
+	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/config"
 	"github.com/book-expert/tts-service/internal/core"
+	"github.com/book-expert/tts-service/internal/mixer"
 	"github.com/book-expert/tts-service/internal/objectstore"
-	"github.com/book-expert/tts-service/internal/tts"
+	"github.com/book-expert/tts-service/internal/orchestrator"
 	"github.com/book-expert/tts-service/internal/worker"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -109,26 +111,26 @@ func newApplication() (*Application, error) {
 		return nil, fmt.Errorf("failed to initialize Progress Key-Value Store: %w", kvStoreInitError)
 	}
 
-	// 6. Initialize TTS Processor
-	ttsAPIKey := os.Getenv(serviceConfig.TTS.APIKeyEnvironmentVariable)
-	if ttsAPIKey == "" {
+	// 6. Initialize Audio Orchestrator
+	audioClient, err := audio.NewClient(context.Background(), natsConnection, jetStreamContext, systemLogger)
+	if err != nil {
 		natsConnection.Close()
 		_ = systemLogger.Close()
-		return nil, fmt.Errorf("mandatory environment variable '%s' is missing", serviceConfig.TTS.APIKeyEnvironmentVariable)
+		return nil, fmt.Errorf("failed to init audio client: %w", err)
 	}
 
-	ttsProcessor, ttsInitError := tts.New(context.Background(), serviceConfig.TTS.BaseURL, ttsAPIKey, serviceConfig.TTS.Model, serviceConfig.TTS.VoiceName, systemLogger)
-	if ttsInitError != nil {
-		natsConnection.Close()
-		_ = systemLogger.Close()
-		return nil, fmt.Errorf("failed to initialize TTS Processor: %w", ttsInitError)
-	}
+	audioMixer := mixer.New(systemLogger)
+	ttsOrchestrator := orchestrator.New(
+		audioClient,
+		audioMixer,
+		systemLogger,
+	)
 
 	// 7. Create Worker
 	natsWorker, workerInitError := worker.NewNatsWorker(
 		natsConnection,
 		jetStreamContext,
-		jetStreamContext, // Passed twice as ConsumerContext and PublisherContext (based on original code signature)
+		jetStreamContext, // Passed twice as ConsumerContext and PublisherContext
 		serviceConfig.NATS.Consumer.StreamName,
 		serviceConfig.NATS.Consumer.SubjectFilter,
 		serviceConfig.NATS.Consumer.DurableName,
@@ -137,10 +139,9 @@ func newApplication() (*Application, error) {
 		textObjectStore,
 		ttsObjectStore,
 		progressKeyValueStore,
-		ttsProcessor,
+		ttsOrchestrator, // Injects as core.TTSProcessor
 		systemLogger,
-		serviceConfig.Service.WorkerCount,
-		serviceConfig.TTS.RequestsPerMinute,
+		1, // Forced to 1 to process one page at a time (chunks are parallelized internally)
 	)
 	if workerInitError != nil {
 		natsConnection.Close()

@@ -86,4 +86,3 @@ func (natsStore *NatsObjectStore) Upload(ctx context.Context, objectKey string, 
 
 	return nil
 }
-

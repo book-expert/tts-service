@@ -1,5 +1,3 @@
-// Package worker implements the NATS consumer logic for the TTS service.
-// It handles message consumption, text-to-speech processing, and audio aggregation.
 package worker
 
 import (
@@ -35,14 +33,7 @@ const (
 	DeadLetterQueueBackoffDuration = 2 * time.Second
 
 	// AudioSampleRateHz is the standard sample rate for the generated WAV audio.
-	// Gemini default is typically 24kHz. We set this to 24000 to match the source.
-	AudioSampleRateHz = 24000
-
-	// AudioChannelsMono indicates single-channel audio.
-	AudioChannelsMono = 1
-
-	// AudioBitsPerSample defines the bit depth of the PCM audio.
-	AudioBitsPerSample = 16
+	AudioSampleRateHz = 48000
 
 	// ProgressCompletedValue is the value stored in the Key-Value store to mark a page as processed.
 	ProgressCompletedValue = "done"
@@ -58,10 +49,12 @@ const (
 
 	// FinalAudioKeyFormat defines the naming convention for the aggregated WAV file.
 	FinalAudioKeyFormat = "%s.wav"
+
+	// NoSpeechMarker is the token used in text to indicate silence should be generated.
+	NoSpeechMarker = "[NO_SPEECH]"
 )
 
 // JetStreamPublisher defines the interface for publishing messages to JetStream.
-// Why: Isolates the worker from the concrete JetStream implementation for easier testing.
 type JetStreamPublisher interface {
 	Publish(ctx context.Context, subject string, data []byte, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 }
@@ -82,7 +75,6 @@ type NatsWorker struct {
 	ttsProcessor           core.TTSProcessor
 	systemLogger           *logger.Logger
 	workerCount            int
-	requestsPerMinute      int
 }
 
 // NewNatsWorker initializes a new NatsWorker with all necessary dependencies.
@@ -101,13 +93,9 @@ func NewNatsWorker(
 	ttsProcessor core.TTSProcessor,
 	systemLogger *logger.Logger,
 	workerCount int,
-	requestsPerMinute int,
 ) (*NatsWorker, error) {
 	if workerCount < 1 {
 		workerCount = 1
-	}
-	if requestsPerMinute < 1 {
-		requestsPerMinute = 1 // Prevent division by zero
 	}
 	return &NatsWorker{
 		natsConnection:         natsConnection,
@@ -124,12 +112,10 @@ func NewNatsWorker(
 		ttsProcessor:           ttsProcessor,
 		systemLogger:           systemLogger,
 		workerCount:            workerCount,
-		requestsPerMinute:      requestsPerMinute,
 	}, nil
 }
 
 // Run executes the main worker loop.
-// Flow: Ensure Consumer -> Fetch -> Process -> Ack/Nak
 func (worker *NatsWorker) Run(ctx context.Context) error {
 	stream, err := worker.jetstreamAdmin.Stream(ctx, worker.subscriptionStream)
 	if err != nil {
@@ -147,13 +133,7 @@ func (worker *NatsWorker) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to create or update consumer %s: %w", worker.consumerDurableName, err)
 	}
 
-	worker.systemLogger.Infof("Worker running on subject %s with %d concurrent workers. Rate limit: %d RPM", worker.subscriptionSubject, worker.workerCount, worker.requestsPerMinute)
-
-	// Calculate the interval between requests to satisfy the Rate Limit (RPM).
-	// Example: 10 RPM = 1 request every 6 seconds.
-	rateLimitInterval := time.Minute / time.Duration(worker.requestsPerMinute)
-	rateLimiterTicker := time.NewTicker(rateLimitInterval)
-	defer rateLimiterTicker.Stop()
+	worker.systemLogger.Infof("Worker running on subject %s with %d concurrent workers.", worker.subscriptionSubject, worker.workerCount)
 
 	var wg sync.WaitGroup
 
@@ -161,7 +141,7 @@ func (worker *NatsWorker) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			worker.consumeLoop(ctx, consumer, workerID, rateLimiterTicker.C)
+			worker.consumeLoop(ctx, consumer, workerID)
 		}(i)
 	}
 
@@ -169,9 +149,8 @@ func (worker *NatsWorker) Run(ctx context.Context) error {
 	return nil
 }
 
-func (worker *NatsWorker) consumeLoop(ctx context.Context, consumer jetstream.Consumer, workerID int, tick <-chan time.Time) {
+func (worker *NatsWorker) consumeLoop(ctx context.Context, consumer jetstream.Consumer, workerID int) {
 	for {
-		// Check context cancellation at start of loop
 		if ctx.Err() != nil {
 			return
 		}
@@ -180,17 +159,14 @@ func (worker *NatsWorker) consumeLoop(ctx context.Context, consumer jetstream.Co
 		if fetchErr != nil {
 			if !errors.Is(fetchErr, nats.ErrTimeout) {
 				worker.systemLogger.Errorf("[Worker %d] Failed to fetch message batch: %v", workerID, fetchErr)
+				// Prevent tight loop on persistent errors (e.g. stream not found)
+				time.Sleep(1 * time.Second)
 			}
 			continue
 		}
 
 		for message := range messageBatch.Messages() {
-			// Rate Limit: Wait for the next tick before processing.
-			// All workers share the same ticker channel, creating a global queue.
-			select {
-			case <-tick:
-				// Proceed
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
 			}
 			worker.processMessage(ctx, message)
@@ -198,7 +174,6 @@ func (worker *NatsWorker) consumeLoop(ctx context.Context, consumer jetstream.Co
 	}
 }
 
-// processMessage handles the lifecycle of a single NATS message.
 func (worker *NatsWorker) processMessage(ctx context.Context, message jetstream.Msg) {
 	processingContext, cancelProcessing := context.WithTimeout(ctx, MessageProcessingTimeout)
 	defer cancelProcessing()
@@ -206,7 +181,6 @@ func (worker *NatsWorker) processMessage(ctx context.Context, message jetstream.
 	event, parseErr := worker.parseAndValidateEvent(message)
 	if parseErr != nil {
 		worker.systemLogger.Errorf("Event validation failed: %v", parseErr)
-		// Invalid events are terminal; move to DLQ immediately.
 		worker.handleProcessingFailure(processingContext, message, message.Data())
 		return
 	}
@@ -217,7 +191,6 @@ func (worker *NatsWorker) processMessage(ctx context.Context, message jetstream.
 		worker.systemLogger.Warnf("Failed to signal InProgress: %v", err)
 	}
 
-	// Start Keep-Alive (Heartbeat) to prevent NATS redelivery during long processing
 	stopKeepAlive := worker.keepAlive(processingContext, message)
 	defer stopKeepAlive()
 
@@ -232,12 +205,7 @@ func (worker *NatsWorker) processMessage(ctx context.Context, message jetstream.
 	}
 }
 
-// keepAlive starts a background ticker that periodically sends InProgress signals
-// to NATS to prevent the message from being redelivered due to AckWait timeout.
-// It returns a cancellation function that must be called when processing is done.
 func (worker *NatsWorker) keepAlive(ctx context.Context, msg jetstream.Msg) func() {
-	// Send InProgress every 10 seconds.
-	// Ensure this is less than the Consumer's AckWait (default often 30s).
 	ticker := time.NewTicker(10 * time.Second)
 	done := make(chan struct{})
 
@@ -262,7 +230,6 @@ func (worker *NatsWorker) keepAlive(ctx context.Context, msg jetstream.Msg) func
 	}
 }
 
-// handleProcessingFailure manages failed messages by attempting to publish them to the DLQ.
 func (worker *NatsWorker) handleProcessingFailure(ctx context.Context, message jetstream.Msg, payload []byte) {
 	if worker.deadLetterQueueSubject == "" {
 		_ = message.Nak()
@@ -271,18 +238,15 @@ func (worker *NatsWorker) handleProcessingFailure(ctx context.Context, message j
 
 	for attempt := 1; attempt <= DeadLetterQueuePublishMaxRetries; attempt++ {
 		if _, err := worker.jetstreamPublisher.Publish(ctx, worker.deadLetterQueueSubject, payload); err == nil {
-			// If DLQ publish succeeds, ACK the original message to remove it from the main queue.
 			_ = message.Ack()
 			return
 		}
 		time.Sleep(DeadLetterQueueBackoffDuration)
 	}
 
-	// Fallback to NAK if DLQ fails.
 	_ = message.NakWithDelay(DeadLetterQueueBackoffDuration)
 }
 
-// executeTTSJob performs the core business logic.
 func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextProcessedEvent) error {
 	// 1. Get Text
 	cleanText, err := worker.retrieveAndCleanText(ctx, event.TextKey)
@@ -290,42 +254,50 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 		return err
 	}
 
-	// 2. Generate Audio
-	// The text already contains the "Director Mode" script (Audio Profile, etc.) generated by the upstream service.
-	// We pass it directly to the TTS processor.
-	ttsConfiguration := core.TTSConfig{
-		Voice:       event.Settings.Voice,
-		Language:    event.Settings.Language,
-		StylePrompt: "", // Style is embedded in the text headers
+	// 2. Create TTS Configuration from event
+	var ttsConfiguration core.TTSConfig
+	if event.Settings != nil && event.Settings.AudioSessionConfig != nil {
+		ttsConfiguration = core.TTSConfig{
+			SessionID:   event.Settings.AudioSessionConfig.SessionID,
+			VoiceID:     event.Settings.AudioSessionConfig.VoiceID,
+			MusicPrompt: event.Settings.AudioSessionConfig.MusicPrompt,
+		}
+	} else {
+		// This case should ideally not happen if events are constructed correctly upstream.
+		worker.systemLogger.Warnf("AudioSessionConfig not found in event for workflow %s. Proceeding with empty TTS config.", event.Header.WorkflowID)
+		// Let the orchestrator handle the zero-valued config.
+		ttsConfiguration = core.TTSConfig{}
 	}
-	
-	var pcmAudioData []byte
-	
-	// Check for the [NO_SPEECH] marker (handling potential whitespace or surrounding text if model was chatty)
-	if strings.Contains(string(cleanText), "[NO_SPEECH]") {
-		worker.systemLogger.Infof("Skipping TTS for Page %d (Marked as [NO_SPEECH]). Using 1s silence.", event.PageNumber)
-		// Create 1 second of silence: SampleRate * 1 channel * 2 bytes (16-bit)
-		pcmAudioData = make([]byte, AudioSampleRateHz*2)
+
+	// 3. Generate Audio
+	var audioData []byte
+	if strings.Contains(string(cleanText), NoSpeechMarker) {
+		worker.systemLogger.Infof("Skipping TTS for Page %d (Marked as %s). Using 1s silence.", event.PageNumber, NoSpeechMarker)
+		audioData = generateSilentWav(1*time.Second, AudioSampleRateHz, 1, 32)
 	} else {
 		var err error
-		pcmAudioData, err = worker.ttsProcessor.Process(ctx, cleanText, ttsConfiguration)
+		audioData, err = worker.ttsProcessor.Process(ctx, cleanText, ttsConfiguration)
 		if err != nil {
 			return fmt.Errorf("TTS generation failed: %w", err)
 		}
 	}
 
-	// 3. Store Audio Chunk
+	// 4. Store Audio Chunk (Now a WAV file, not raw PCM)
 	audioChunkKey := fmt.Sprintf(AudioChunkKeyFormat, event.Header.WorkflowID, event.PageNumber)
-	if err := worker.audioObjectStore.Upload(ctx, audioChunkKey, pcmAudioData); err != nil {
+	if !strings.HasSuffix(audioChunkKey, ".wav") {
+		audioChunkKey = strings.Replace(audioChunkKey, ".pcm", ".wav", 1)
+	}
+
+	if err := worker.audioObjectStore.Upload(ctx, audioChunkKey, audioData); err != nil {
 		return fmt.Errorf("audio upload failed: %w", err)
 	}
 
-	// 4. Update Progress
+	// 5. Update Progress
 	if err := worker.updateProgress(ctx, event.Header.WorkflowID, event.PageNumber); err != nil {
 		return err
 	}
 
-	// 5. Check Completeness & Aggregate
+	// 6. Check Completeness & Aggregate
 	isComplete, err := worker.checkCompleteness(ctx, event.Header.WorkflowID, event.TotalPages)
 	if err != nil {
 		return err
@@ -339,7 +311,6 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 	return nil
 }
 
-// retrieveAndCleanText downloads the raw text and normalizes it (JSON parsing if needed).
 func (worker *NatsWorker) retrieveAndCleanText(ctx context.Context, textKey string) ([]byte, error) {
 	textContent, err := worker.textObjectStore.Download(ctx, textKey)
 	if err != nil {
@@ -348,7 +319,6 @@ func (worker *NatsWorker) retrieveAndCleanText(ctx context.Context, textKey stri
 
 	var textSegments []string
 	if jsonErr := json.Unmarshal(textContent, &textSegments); jsonErr == nil {
-		// Join segments with double newlines for clear pauses.
 		joinedText := ""
 		for i, segment := range textSegments {
 			if i > 0 {
@@ -359,11 +329,9 @@ func (worker *NatsWorker) retrieveAndCleanText(ctx context.Context, textKey stri
 		return []byte(joinedText), nil
 	}
 
-	// Fallback to raw bytes if not JSON
 	return textContent, nil
 }
 
-// updateProgress marks the current page as done in the KV store.
 func (worker *NatsWorker) updateProgress(ctx context.Context, workflowID string, pageNumber int) error {
 	progressKey := fmt.Sprintf(KeyValueKeyFormat, workflowID, pageNumber)
 	if _, err := worker.progressKeyValueStore.Put(ctx, progressKey, []byte(ProgressCompletedValue)); err != nil {
@@ -372,7 +340,6 @@ func (worker *NatsWorker) updateProgress(ctx context.Context, workflowID string,
 	return nil
 }
 
-// checkCompleteness verifies if all pages for the workflow exist in the KV store.
 func (worker *NatsWorker) checkCompleteness(ctx context.Context, workflowID string, totalPages int) (bool, error) {
 	keyFilter := fmt.Sprintf(KeyValueFilterPatternFormat, workflowID)
 	keyLister, err := worker.progressKeyValueStore.ListKeysFiltered(ctx, keyFilter)
@@ -391,66 +358,67 @@ func (worker *NatsWorker) checkCompleteness(ctx context.Context, workflowID stri
 	return completedCount == totalPages, nil
 }
 
-// aggregateAndFinalizeWorkflow combines chunks and publishes the final event.
 func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 	ctx context.Context,
 	workflowID string,
 	totalPages int,
 	header events.EventHeader,
 ) error {
-	var aggregatedPCMData []byte
-
-	// Sequential aggregation guarantees order.
-	for pageIndex := 1; pageIndex <= totalPages; pageIndex++ {
-		chunkKey := fmt.Sprintf(AudioChunkKeyFormat, workflowID, pageIndex)
-		chunkData, err := worker.audioObjectStore.Download(ctx, chunkKey)
-		if err != nil {
-			return fmt.Errorf("download chunk %s failed: %w", chunkKey, err)
-		}
-		aggregatedPCMData = append(aggregatedPCMData, chunkData...)
-	}
-
-	// Create temp directory for processing
 	tmpDir, err := os.MkdirTemp("", "tts-aggregate")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	pcmPath := filepath.Join(tmpDir, "raw.pcm")
-	wavPath := filepath.Join(tmpDir, "final.wav")
-
-	// Write raw PCM to file
-	if err := os.WriteFile(pcmPath, aggregatedPCMData, 0644); err != nil {
-		return fmt.Errorf("write pcm file: %w", err)
+	listPath := filepath.Join(tmpDir, "files.txt")
+	fList, err := os.Create(listPath)
+	if err != nil {
+		return err
 	}
 
-	// Use FFmpeg to convert raw PCM (24kHz) to WAV (48kHz) with high-quality resampling
-	// -f s16le: Input format (Signed 16-bit Little Endian)
-	// -ar 24000: Input Sample Rate
-	// -ac 1: Input Channels
-	// -c:a pcm_s16le: Output Codec (keep it standard WAV)
-	// -af aresample=resampler=soxr: Use the SoX Resampler library for high-quality upsampling
-	// -ar 48000: Output Sample Rate
+	for pageIndex := 1; pageIndex <= totalPages; pageIndex++ {
+		chunkKey := fmt.Sprintf(AudioChunkKeyFormat, workflowID, pageIndex)
+		if !strings.HasSuffix(chunkKey, ".wav") {
+			chunkKey = strings.Replace(chunkKey, ".pcm", ".wav", 1)
+		}
+
+		chunkData, err := worker.audioObjectStore.Download(ctx, chunkKey)
+		if err != nil {
+			_ = fList.Close()
+			return fmt.Errorf("download chunk %s failed: %w", chunkKey, err)
+		}
+
+		chunkPath := filepath.Join(tmpDir, fmt.Sprintf("page_%d.wav", pageIndex))
+		if err := os.WriteFile(chunkPath, chunkData, 0644); err != nil {
+			_ = fList.Close()
+			return err
+		}
+
+		if _, err := fmt.Fprintf(fList, "file '%s'\n", chunkPath); err != nil {
+			_ = fList.Close()
+			return err
+		}
+	}
+	if err := fList.Close(); err != nil {
+		return err
+	}
+	wavPath := filepath.Join(tmpDir, "final.wav")
+
 	cmd := exec.Command("ffmpeg",
-		"-f", "s16le",
-		"-ar", fmt.Sprintf("%d", AudioSampleRateHz),
-		"-ac", fmt.Sprintf("%d", AudioChannelsMono),
-		"-i", pcmPath,
-		"-c:a", "pcm_s16le",
-		"-af", "aresample=resampler=soxr", 
-		"-ar", "48000",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", listPath,
+		"-c", "copy",
+		"-rf64", "auto",
 		"-y",
 		wavPath,
 	)
 
-	// Capture output for debugging in case of failure
 	if output, err := cmd.CombinedOutput(); err != nil {
-		worker.systemLogger.Errorf("FFmpeg output: %s", string(output))
-		return fmt.Errorf("ffmpeg conversion failed: %w", err)
+		worker.systemLogger.Errorf("FFmpeg concat output: %s", string(output))
+		return fmt.Errorf("ffmpeg aggregation failed: %w", err)
 	}
 
-	// Read the generated WAV file
 	finalWavData, err := os.ReadFile(wavPath)
 	if err != nil {
 		return fmt.Errorf("read final wav: %w", err)
@@ -465,7 +433,7 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 	completionEvent := &events.AudioChunkCreatedEvent{
 		Header:     header,
 		AudioKey:   finalKey,
-		PageNumber: 0, // 0 indicates the merged file
+		PageNumber: 0,
 		TotalPages: totalPages,
 	}
 

@@ -8,11 +8,11 @@ type ObjectStore interface {
 	Upload(ctx context.Context, key string, data []byte) error
 }
 
-// TTSConfig holds configuration for a specific TTS request.
+// TTSConfig holds configuration for a specific TTS request, derived from events.AudioSessionConfig.
 type TTSConfig struct {
-	Voice       string
-	Language    string
-	StylePrompt string
+	SessionID   string
+	VoiceID     string
+	MusicPrompt string
 }
 
 // TTSProcessor defines the interface for text-to-speech processing.

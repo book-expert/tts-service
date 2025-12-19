@@ -1,13 +1,16 @@
 [service]
-log_dir = "./logs"
+log_dir = "/home/niko/development/logs/tts-logs"
 workers = 2
 
 [tts]
-requests_per_minute = 5
 api_key_variable = "GEMINI_API_KEY"
 base_url = "https://generativelanguage.googleapis.com"
-model = "gemini-2.5-flash-preview-tts"
-voice_name = "Puck"
+audio_server_subject = "audio.speech.request"
+
+[audio]
+music_subject = "audio.music.request"
+# These constraints are appended to every music prompt to ensure consistency.
+technical_prompt = "Ambient, Drone, Sustained Chords, No Vocals, No Percussion, 48kHz, Stereo, High Fidelity, Cinematic, Background Music"
 
 [nats]
 url = "nats://192.168.122.102:4222"
@@ -28,3 +31,4 @@ tts_bucket = "TTS_FILES"
 
 [nats.kv]
 progress_bucket = "TTS_PROGRESS"
+
