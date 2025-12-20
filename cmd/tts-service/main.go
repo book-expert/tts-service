@@ -112,21 +112,15 @@ func newApplication() (*Application, error) {
 	}
 
 	// 6. Initialize Audio Orchestrator
-	audioClient, err := audio.NewClient(context.Background(), natsConnection, jetStreamContext, systemLogger)
-	if err != nil {
-		natsConnection.Close()
-		_ = systemLogger.Close()
-		return nil, fmt.Errorf("failed to init audio client: %w", err)
-	}
+	audioClient := audio.NewClient(serviceConfig.TTS.AudioServerURL, systemLogger)
 
 	audioMixer := mixer.New(systemLogger)
 	ttsOrchestrator := orchestrator.New(
 		audioClient,
 		audioMixer,
 		systemLogger,
-	)
-
-	// 7. Create Worker
+		serviceConfig.TTS.SpeechConcurrency,
+	) // 7. Create Worker
 	natsWorker, workerInitError := worker.NewNatsWorker(
 		natsConnection,
 		jetStreamContext,

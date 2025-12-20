@@ -1,9 +1,60 @@
+/*
+GOLDEN RULES & DEVELOPER MANIFESTO (THE NORTH STAR)
+--------------------------------------------------------------------------------
+"Work is love made visible. And if you cannot work with love but only with
+distaste, it is better that you should leave your work and sit at the gate of
+the temple and take alms of those who work with joy." — Kahlil Gibran
+
+1.  LOVE AND CARE (Primary Driver)
+    - This is a craft. Build with pride, honesty, and kindness.
+    - If you put love in your work, you build something deserving of love.
+    - Be helpful: Code is read more than written; optimize for the reader.
+
+2.  WRITE WHAT YOU MEAN (Explicit > Implicit)
+    - Use WHOLE WORDS: `RequestIdentifier` not `ReqID`.
+    - No magic numbers: Move application settings to `project.toml`.
+    - Secure by design: Keep API keys and secrets strictly in `.env`.
+    - No ambiguity: If you assume something, document it.
+
+3.  SIMPLE IS EFFICIENT (Minimal Viable Elegance)
+    - Avoid over-engineering. Small interfaces, clear structs.
+    - If a design requires a hack, stop. Redesign it with elegance.
+    - Lean, Clean, Mean: Delete dead code immediately.
+
+4.  NO BASELESS ASSUMPTIONS (Scientific Rigor)
+    - Do not guess. Base decisions on documentation and proven patterns.
+    - If you do not know, ask or verify.
+
+5.  NON-BLOCKING & ROBUST
+    - Never block the main goroutine. Use Context for cancellation.
+    - Handle errors explicitly: Don't just return them, wrap them with context.
+
+--------------------------------------------------------------------------------
+EXAMPLES OF "LOVE AND CARE" IN THIS CONTEXT:
+--------------------------------------------------------------------------------
+(A) NAMING
+    Indifferent:  func Gen(t string, v string)
+    With Love:    func GenerateSoundscape(ctx context.Context, textPrompt string, voiceID string)
+    *Why: The Agent reading this next year will know exactly what it does and that it is cancellable.*
+
+(B) CONFIGURATION
+    Indifferent:  const Timeout = 30 // Hardcoded
+    With Love:    config.App.TimeoutSeconds // Loaded from project.toml
+    *Why: Allows behavior tuning without recompiling or touching the codebase.*
+
+(C) ERROR HANDLING
+    Indifferent:  if err != nil { return err }
+    With Love:    if err != nil { return fmt.Errorf("failed to initialize vox engine: %w", err) }
+    *Why: Wrapping the error gives the user the 'trace of breadcrumbs' they need to fix it. That is kindness.*
+--------------------------------------------------------------------------------
+*/
+
 package orchestrator
 
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -15,26 +66,22 @@ import (
 	"github.com/book-expert/tts-service/internal/tts"
 )
 
-// MaxSpeechConcurrency defines the maximum number of concurrent speech generation requests per page.
-// Set to 3 to improve throughput on GPU-enabled workers.
-const MaxSpeechConcurrency = 3
-
 type Processor struct {
-	audioClient *audio.Client
-	mixer       *mixer.Mixer
-	logger      *logger.Logger
-
-	// Music Suite Cache: SessionID -> []FilePaths
-	musicCache map[string][]string
-	cacheMu    sync.RWMutex
+	audioClient       *audio.Client
+	mixer             *mixer.Mixer
+	logger            *logger.Logger
+	speechConcurrency int
 }
 
-func New(client *audio.Client, mix *mixer.Mixer, log *logger.Logger) *Processor {
+func New(client *audio.Client, mix *mixer.Mixer, log *logger.Logger, concurrency int) *Processor {
+	if concurrency <= 0 {
+		concurrency = 1
+	}
 	return &Processor{
-		audioClient: client,
-		mixer:       mix,
-		logger:      log,
-		musicCache:  make(map[string][]string),
+		audioClient:       client,
+		mixer:             mix,
+		logger:            log,
+		speechConcurrency: concurrency,
 	}
 }
 
@@ -44,7 +91,7 @@ func (p *Processor) Process(ctx context.Context, text []byte, config core.TTSCon
 		return nil, fmt.Errorf("empty text")
 	}
 
-	p.logger.Infof("Processing Text. SessionID: %s, VoiceID: %s, MusicPrompt: '%s'", config.SessionID, config.VoiceID, config.MusicPrompt)
+	p.logger.Infof("Processing Text. SessionID: %s, VoiceID: %s", config.SessionID, config.VoiceID)
 
 	// Track temp files for cleanup
 	var tempFiles []string
@@ -71,13 +118,11 @@ func (p *Processor) Process(ctx context.Context, text []byte, config core.TTSCon
 
 	var (
 		finalSpeechPath string
-		musicPath       string
 		speechErr       error
-		musicErr        error
 		wg              sync.WaitGroup
 	)
 
-	// 1. Generate Speech (Async - Chunked)
+	// 1. Generate Speech (Async - Full Page)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -91,81 +136,42 @@ func (p *Processor) Process(ctx context.Context, text []byte, config core.TTSCon
 			return
 		}
 
-		type chunkResult struct {
-			index int
-			path  string
-			err   error
+		var chunkStrings []string
+		for _, c := range chunks {
+			chunkStrings = append(chunkStrings, c.Text)
 		}
 
-		chunkResults := make([]string, len(chunks))
-		resultChan := make(chan chunkResult, len(chunks))
-		var chunkWg sync.WaitGroup
+		// Pass the VoiceID directly to the client.
+		voiceID := config.VoiceID
 
-		sem := make(chan struct{}, MaxSpeechConcurrency)
-
-		for _, chunk := range chunks {
-			chunkWg.Add(1)
-			sem <- struct{}{} // Acquire token
-
-			go func(c tts.TextChunk) {
-				defer chunkWg.Done()
-				defer func() { <-sem }() // Release token
-
-				// Pass the VoiceID and VoiceStyle directly to the client.
-				voiceID := config.VoiceID
-
-				start := time.Now()
-				path, err := p.audioClient.GenerateSpeech(ctx, c.Text, voiceID, promptText)
-				duration := time.Since(start)
-
-				if err == nil {
-					addTempFile(path)
-					p.logger.Infof("Chunk %d processed in %v", c.ID, duration)
-				} else {
-					p.logger.Errorf("Chunk %d failed after %v: %v", c.ID, duration, err)
-				}
-				resultChan <- chunkResult{index: c.ID, path: path, err: err}
-			}(chunk)
+		start := time.Now()
+		stream, err := p.audioClient.GenerateSpeech(ctx, chunkStrings, voiceID, promptText)
+		if err != nil {
+			speechErr = fmt.Errorf("generate speech failed: %w", err)
+			return
 		}
+		defer func() { _ = stream.Close() }()
 
-		chunkWg.Wait()
-		close(resultChan)
-
-		for res := range resultChan {
-			if res.err != nil {
-				if speechErr == nil {
-					speechErr = fmt.Errorf("chunk %d failed: %w", res.index, res.err)
-				}
-				continue
-			}
-			chunkResults[res.index] = res.path
-		}
-
-		if speechErr != nil {
+		// Stream to temp file
+		tmpFile, err := os.CreateTemp("", "tts_page_*.wav")
+		if err != nil {
+			speechErr = fmt.Errorf("create temp file failed: %w", err)
 			return
 		}
 
-		if len(chunkResults) == 1 {
-			finalSpeechPath = chunkResults[0]
-		} else {
-			mergedPath, err := p.mixer.Concatenate(ctx, chunkResults)
-			if err != nil {
-				speechErr = fmt.Errorf("concatenation failed: %w", err)
-				return
-			}
-			addTempFile(mergedPath)
-			finalSpeechPath = mergedPath
+		if _, err := io.Copy(tmpFile, stream); err != nil {
+			_ = tmpFile.Close()
+			speechErr = fmt.Errorf("stream copy failed: %w", err)
+			return
 		}
-	}()
+		finalSpeechPath = tmpFile.Name()
+		if err := tmpFile.Close(); err != nil {
+			p.logger.Warnf("failed to close temp file %s: %v", finalSpeechPath, err)
+		}
 
-	// 2. Handle Music (Async)
-	if config.MusicPrompt != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			musicPath, musicErr = p.getMusicTrack(ctx, config.SessionID, config.MusicPrompt)
-		}()
-	}
+		addTempFile(finalSpeechPath)
+		p.logger.Infof("Page processed in %v", time.Since(start))
+	}()
 
 	wg.Wait()
 
@@ -173,49 +179,48 @@ func (p *Processor) Process(ctx context.Context, text []byte, config core.TTSCon
 	if speechErr != nil {
 		return nil, fmt.Errorf("speech gen failed: %w", speechErr)
 	}
-	if musicErr != nil {
-		p.logger.Warnf("Failed to get music suite, falling back to dry speech: %v", musicErr)
-	}
 
-	// 3. Mix
-	if musicPath == "" {
-		return p.mixer.ConvertTo48k(ctx, finalSpeechPath)
-	}
-
-	return p.mixer.Mix(ctx, finalSpeechPath, musicPath)
+	// 2. Convert to Standard 48k (No Mixing)
+	return p.mixer.ConvertTo48k(ctx, finalSpeechPath)
 }
 
-func (p *Processor) getMusicTrack(ctx context.Context, sessionID, prompt string) (string, error) {
-	// Check Cache
-	p.cacheMu.RLock()
-	files, ok := p.musicCache[sessionID]
-	p.cacheMu.RUnlock()
-
-	if ok && len(files) > 0 {
-		// Pick random
-		return files[rand.Intn(len(files))], nil
-	}
-
-	// Generate Suite
-	// Lock for writing to prevent double-generation
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-
-	// Double check
-	if files, ok = p.musicCache[sessionID]; ok && len(files) > 0 {
-		return files[rand.Intn(len(files))], nil
-	}
-
-	p.logger.Infof("Generating new Music Suite for Session %s...", sessionID)
-	files, err := p.audioClient.GenerateMusicSuite(ctx, prompt)
+func (p *Processor) GenerateMusic(ctx context.Context, prompt string, duration int) ([]byte, error) {
+	stream, err := p.audioClient.GenerateMusic(ctx, prompt, duration)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("music gen failed: %w", err)
 	}
+	defer func() {
+		if err := stream.Close(); err != nil {
+			p.logger.Warnf("failed to close music stream: %v", err)
+		}
+	}()
 
-	p.musicCache[sessionID] = files
-	if len(files) == 0 {
-		return "", fmt.Errorf("no music files generated")
+	return io.ReadAll(stream)
+}
+
+func (p *Processor) MixAudio(ctx context.Context, speechData, musicData []byte) ([]byte, error) {
+	stream, err := p.audioClient.MixAudio(ctx, speechData, musicData)
+	if err != nil {
+		return nil, fmt.Errorf("mix audio failed: %w", err)
 	}
+	defer func() {
+		if err := stream.Close(); err != nil {
+			p.logger.Warnf("failed to close music stream: %v", err)
+		}
+	}()
 
-	return files[0], nil
+	return io.ReadAll(stream)
+}
+
+func (p *Processor) FinalizeAudio(ctx context.Context, speechData []byte, musicPrompt string) ([]byte, error) {
+	stream, err := p.audioClient.FinalizeAudio(ctx, speechData, musicPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("finalize audio failed: %w", err)
+	}
+	defer func() {
+		if err := stream.Close(); err != nil {
+			p.logger.Warnf("failed to close finalize stream: %v", err)
+		}
+	}()
+	return io.ReadAll(stream)
 }

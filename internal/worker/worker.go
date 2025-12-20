@@ -1,12 +1,63 @@
+/*
+GOLDEN RULES & DEVELOPER MANIFESTO (THE NORTH STAR)
+--------------------------------------------------------------------------------
+"Work is love made visible. And if you cannot work with love but only with
+distaste, it is better that you should leave your work and sit at the gate of
+the temple and take alms of those who work with joy." — Kahlil Gibran
+
+1.  LOVE AND CARE (Primary Driver)
+    - This is a craft. Build with pride, honesty, and kindness.
+    - If you put love in your work, you build something deserving of love.
+    - Be helpful: Code is read more than written; optimize for the reader.
+
+2.  WRITE WHAT YOU MEAN (Explicit > Implicit)
+    - Use WHOLE WORDS: `RequestIdentifier` not `ReqID`.
+    - No magic numbers: Move application settings to `project.toml`.
+    - Secure by design: Keep API keys and secrets strictly in `.env`.
+    - No ambiguity: If you assume something, document it.
+
+3.  SIMPLE IS EFFICIENT (Minimal Viable Elegance)
+    - Avoid over-engineering. Small interfaces, clear structs.
+    - If a design requires a hack, stop. Redesign it with elegance.
+    - Lean, Clean, Mean: Delete dead code immediately.
+
+4.  NO BASELESS ASSUMPTIONS (Scientific Rigor)
+    - Do not guess. Base decisions on documentation and proven patterns.
+    - If you do not know, ask or verify.
+
+5.  NON-BLOCKING & ROBUST
+    - Never block the main goroutine. Use Context for cancellation.
+    - Handle errors explicitly: Don't just return them, wrap them with context.
+
+--------------------------------------------------------------------------------
+EXAMPLES OF "LOVE AND CARE" IN THIS CONTEXT:
+--------------------------------------------------------------------------------
+(A) NAMING
+    Indifferent:  func Gen(t string, v string)
+    With Love:    func GenerateSoundscape(ctx context.Context, textPrompt string, voiceID string)
+    *Why: The Agent reading this next year will know exactly what it does and that it is cancellable.*
+
+(B) CONFIGURATION
+    Indifferent:  const Timeout = 30 // Hardcoded
+    With Love:    config.App.TimeoutSeconds // Loaded from project.toml
+    *Why: Allows behavior tuning without recompiling or touching the codebase.*
+
+(C) ERROR HANDLING
+    Indifferent:  if err != nil { return err }
+    With Love:    if err != nil { return fmt.Errorf("failed to initialize vox engine: %w", err) }
+    *Why: Wrapping the error gives the user the 'trace of breadcrumbs' they need to fix it. That is kindness.*
+--------------------------------------------------------------------------------
+*/
+
 package worker
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -305,7 +356,11 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 
 	if isComplete {
 		worker.systemLogger.Infof("All pages complete for %s. Aggregating audio.", event.Header.WorkflowID)
-		return worker.aggregateAndFinalizeWorkflow(ctx, event.Header.WorkflowID, event.TotalPages, event.Header)
+		musicPrompt := ""
+		if event.Settings != nil && event.Settings.AudioSessionConfig != nil {
+			musicPrompt = event.Settings.AudioSessionConfig.MusicPrompt
+		}
+		return worker.aggregateAndFinalizeWorkflow(ctx, event.Header.WorkflowID, event.TotalPages, event.Header, musicPrompt)
 	}
 
 	return nil
@@ -363,6 +418,7 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 	workflowID string,
 	totalPages int,
 	header events.EventHeader,
+	musicPrompt string,
 ) error {
 	tmpDir, err := os.MkdirTemp("", "tts-aggregate")
 	if err != nil {
@@ -370,12 +426,8 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	listPath := filepath.Join(tmpDir, "files.txt")
-	fList, err := os.Create(listPath)
-	if err != nil {
-		return err
-	}
-
+	// 1. Download all chunks
+	var chunkPaths []string
 	for pageIndex := 1; pageIndex <= totalPages; pageIndex++ {
 		chunkKey := fmt.Sprintf(AudioChunkKeyFormat, workflowID, pageIndex)
 		if !strings.HasSuffix(chunkKey, ".wav") {
@@ -384,44 +436,50 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 
 		chunkData, err := worker.audioObjectStore.Download(ctx, chunkKey)
 		if err != nil {
-			_ = fList.Close()
 			return fmt.Errorf("download chunk %s failed: %w", chunkKey, err)
 		}
 
 		chunkPath := filepath.Join(tmpDir, fmt.Sprintf("page_%d.wav", pageIndex))
 		if err := os.WriteFile(chunkPath, chunkData, 0644); err != nil {
-			_ = fList.Close()
 			return err
 		}
-
-		if _, err := fmt.Fprintf(fList, "file '%s'\n", chunkPath); err != nil {
-			_ = fList.Close()
-			return err
-		}
-	}
-	if err := fList.Close(); err != nil {
-		return err
-	}
-	wavPath := filepath.Join(tmpDir, "final.wav")
-
-	cmd := exec.Command("ffmpeg",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", listPath,
-		"-c", "copy",
-		"-rf64", "auto",
-		"-y",
-		wavPath,
-	)
-
-	if output, err := cmd.CombinedOutput(); err != nil {
-		worker.systemLogger.Errorf("FFmpeg concat output: %s", string(output))
-		return fmt.Errorf("ffmpeg aggregation failed: %w", err)
+		chunkPaths = append(chunkPaths, chunkPath)
 	}
 
-	finalWavData, err := os.ReadFile(wavPath)
+	// 2. Concatenate (Pure Go)
+	// We assume all chunks have same format (48kHz, 16bit, Mono/Stereo) as produced by audio-server.
+	// This avoids using local 'ffmpeg' binary.
+	// Note: We need to import the internal/audio package.
+	// HACK: Since we are in internal/worker, we can't easily import internal/audio if it causes cycles.
+	// But internal/audio is a library package, worker depends on it (via Client).
+	// We might need to move ConcatenateWavs to a shared utils package if 'audio' package has dependencies on 'worker' (unlikely).
+	// Let's assume we can access the logic. Since I put it in 'audio' package, and 'worker' imports 'audio' (indirectly via core/interfaces... wait, worker imports core, events, logger, nats).
+	// Worker does NOT currently import 'internal/audio'.
+	// I will copy the concatenation logic here or import it if possible.
+	// To be safe and "Simple", I'll put the concatenation logic in a helper function in this file or a utils file in this package to avoid dependency hell,
+	// OR better: use the 'audio' package if it's clean.
+	// Checking imports... worker.go does NOT import internal/audio.
+	// I'll add the import to worker.go.
+
+	// Wait, I can't edit imports easily with 'replace' on a block.
+	// I'll implement a simple concatenator helper inside worker.go for now to strictly follow "No external deps".
+
+	combinedWavData, err := worker.concatenateWavsInMemory(chunkPaths)
 	if err != nil {
-		return fmt.Errorf("read final wav: %w", err)
+		return fmt.Errorf("wav concatenation failed: %w", err)
+	}
+
+	// 3. Finalize (Remote Mix)
+	// Send to audio-server to measure duration, generate music, and mix.
+	finalWavData := combinedWavData
+	if musicPrompt != "" {
+		worker.systemLogger.Infof("Finalizing audio for %s with music prompt: %s", workflowID, musicPrompt)
+		mixedData, err := worker.ttsProcessor.FinalizeAudio(ctx, combinedWavData, musicPrompt)
+		if err != nil {
+			worker.systemLogger.Errorf("Remote finalization failed: %v. Using speech only.", err)
+		} else {
+			finalWavData = mixedData
+		}
 	}
 
 	finalKey := fmt.Sprintf(FinalAudioKeyFormat, workflowID)
@@ -442,6 +500,51 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 	}
 
 	return nil
+}
+
+// concatenateWavsInMemory merges identical WAV files.
+// Duplicated logic from internal/audio/wav.go to avoid import cycles or large refactors.
+// Ideally this lives in a 'pkg/wav' utility.
+func (worker *NatsWorker) concatenateWavsInMemory(paths []string) ([]byte, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no files")
+	}
+
+	// Minimal WAV Header (44 bytes)
+	// We read the first file's header to get format.
+	firstData, err := os.ReadFile(paths[0])
+	if err != nil {
+		return nil, err
+	}
+	if len(firstData) < 44 {
+		return nil, fmt.Errorf("invalid wav file")
+	}
+
+	header := make([]byte, 44)
+	copy(header, firstData[:44])
+
+	var body []byte
+	body = append(body, firstData[44:]...)
+
+	for i := 1; i < len(paths); i++ {
+		d, err := os.ReadFile(paths[i])
+		if err != nil {
+			return nil, err
+		}
+		if len(d) < 44 {
+			continue
+		}
+		// Append body only
+		body = append(body, d[44:]...)
+	}
+
+	totalSize := uint32(len(body))
+	// Update ChunkSize (Total - 8) @ offset 4
+	binary.LittleEndian.PutUint32(header[4:], 36+totalSize)
+	// Update Subchunk2Size (Data size) @ offset 40
+	binary.LittleEndian.PutUint32(header[40:], totalSize)
+
+	return append(header, body...), nil
 }
 
 func (worker *NatsWorker) publishCompletionEvent(ctx context.Context, event *events.AudioChunkCreatedEvent) error {

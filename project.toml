@@ -5,7 +5,8 @@ workers = 2
 [tts]
 api_key_variable = "GEMINI_API_KEY"
 base_url = "https://generativelanguage.googleapis.com"
-audio_server_subject = "audio.speech.request"
+audio_server_url = "http://localhost:8001"
+speech_concurrency = 1
 
 [audio]
 music_subject = "audio.music.request"
