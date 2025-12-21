@@ -5,7 +5,7 @@ workers = 2
 [tts]
 api_key_variable = "GEMINI_API_KEY"
 base_url = "https://generativelanguage.googleapis.com"
-audio_server_url = "http://localhost:8001"
+audio_server_url = "http://127.0.0.1:8001"
 speech_concurrency = 1
 
 [audio]
@@ -15,6 +15,7 @@ technical_prompt = "Ambient, Drone, Sustained Chords, No Vocals, No Percussion, 
 
 [nats]
 url = "nats://192.168.122.102:4222"
+
 dlq_subject = "tts.dlq"
 
 [nats.consumer]

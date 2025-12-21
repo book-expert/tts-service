@@ -65,9 +65,9 @@ import (
 )
 
 const (
+	RequestTimeout = 15 * time.Minute
 	EndpointSpeech = "/speech"
 	EndpointMusic  = "/music"
-	RequestTimeout = 120 * time.Second // Long timeout for audio generation
 )
 
 type Client struct {

@@ -53,7 +53,6 @@ package worker
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,6 +63,7 @@ import (
 	"time"
 
 	"github.com/book-expert/logger"
+	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/book-expert/tts-service/internal/events"
 	"github.com/nats-io/nats.go"
@@ -100,6 +100,12 @@ const (
 
 	// FinalAudioKeyFormat defines the naming convention for the aggregated WAV file.
 	FinalAudioKeyFormat = "%s.wav"
+
+	// MusicKeyFormat defines the naming convention for the background music file.
+	MusicKeyFormat = "%s_music.wav"
+
+	// MusicGenerationDuration defines the duration of the background music to generate (in seconds).
+	MusicGenerationDuration = 180 // 3 minutes
 
 	// NoSpeechMarker is the token used in text to indicate silence should be generated.
 	NoSpeechMarker = "[NO_SPEECH]"
@@ -299,6 +305,12 @@ func (worker *NatsWorker) handleProcessingFailure(ctx context.Context, message j
 }
 
 func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextProcessedEvent) error {
+	// 0. Trigger Background Music Generation (Page 1 Only)
+	if event.PageNumber == 1 && event.Settings != nil && event.Settings.AudioSessionConfig != nil && event.Settings.AudioSessionConfig.MusicPrompt != "" {
+		worker.systemLogger.Infof("Triggering background music generation for Workflow %s", event.Header.WorkflowID)
+		go worker.generateAndStoreMusic(context.Background(), event.Header.WorkflowID, event.Settings.AudioSessionConfig.MusicPrompt)
+	}
+
 	// 1. Get Text
 	cleanText, err := worker.retrieveAndCleanText(ctx, event.TextKey)
 	if err != nil {
@@ -364,6 +376,26 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 	}
 
 	return nil
+}
+
+func (worker *NatsWorker) generateAndStoreMusic(ctx context.Context, workflowID, prompt string) {
+	// Detach from original context to avoid cancellation if the page finishes early,
+	// but respect a reasonable timeout for music generation.
+	genCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	musicData, err := worker.ttsProcessor.GenerateMusic(genCtx, prompt, MusicGenerationDuration)
+	if err != nil {
+		worker.systemLogger.Errorf("Background music generation failed for %s: %v", workflowID, err)
+		return
+	}
+
+	key := fmt.Sprintf(MusicKeyFormat, workflowID)
+	if err := worker.audioObjectStore.Upload(genCtx, key, musicData); err != nil {
+		worker.systemLogger.Errorf("Failed to upload background music for %s: %v", workflowID, err)
+		return
+	}
+	worker.systemLogger.Infof("Background music stored for %s", workflowID)
 }
 
 func (worker *NatsWorker) retrieveAndCleanText(ctx context.Context, textKey string) ([]byte, error) {
@@ -447,39 +479,41 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 	}
 
 	// 2. Concatenate (Pure Go)
-	// We assume all chunks have same format (48kHz, 16bit, Mono/Stereo) as produced by audio-server.
-	// This avoids using local 'ffmpeg' binary.
-	// Note: We need to import the internal/audio package.
-	// HACK: Since we are in internal/worker, we can't easily import internal/audio if it causes cycles.
-	// But internal/audio is a library package, worker depends on it (via Client).
-	// We might need to move ConcatenateWavs to a shared utils package if 'audio' package has dependencies on 'worker' (unlikely).
-	// Let's assume we can access the logic. Since I put it in 'audio' package, and 'worker' imports 'audio' (indirectly via core/interfaces... wait, worker imports core, events, logger, nats).
-	// Worker does NOT currently import 'internal/audio'.
-	// I will copy the concatenation logic here or import it if possible.
-	// To be safe and "Simple", I'll put the concatenation logic in a helper function in this file or a utils file in this package to avoid dependency hell,
-	// OR better: use the 'audio' package if it's clean.
-	// Checking imports... worker.go does NOT import internal/audio.
-	// I'll add the import to worker.go.
-
-	// Wait, I can't edit imports easily with 'replace' on a block.
-	// I'll implement a simple concatenator helper inside worker.go for now to strictly follow "No external deps".
-
-	combinedWavData, err := worker.concatenateWavsInMemory(chunkPaths)
+	combinedWavData, err := audio.ConcatenateWavs(chunkPaths)
 	if err != nil {
 		return fmt.Errorf("wav concatenation failed: %w", err)
 	}
 
 	// 3. Finalize (Remote Mix)
-	// Send to audio-server to measure duration, generate music, and mix.
-	finalWavData := combinedWavData
+	// Try to find pre-generated music
+	var finalWavData []byte
+	var musicData []byte
+
 	if musicPrompt != "" {
-		worker.systemLogger.Infof("Finalizing audio for %s with music prompt: %s", workflowID, musicPrompt)
-		mixedData, err := worker.ttsProcessor.FinalizeAudio(ctx, combinedWavData, musicPrompt)
-		if err != nil {
-			worker.systemLogger.Errorf("Remote finalization failed: %v. Using speech only.", err)
+		musicKey := fmt.Sprintf(MusicKeyFormat, workflowID)
+		musicData, err = worker.audioObjectStore.Download(ctx, musicKey)
+		
+		if err == nil && len(musicData) > 0 {
+			worker.systemLogger.Infof("Found pre-generated music for %s. Mixing...", workflowID)
+			mixedData, err := worker.ttsProcessor.MixAudio(ctx, combinedWavData, musicData)
+			if err != nil {
+				worker.systemLogger.Errorf("Mixing failed: %v. Fallback to speech only.", err)
+				finalWavData = combinedWavData
+			} else {
+				finalWavData = mixedData
+			}
 		} else {
-			finalWavData = mixedData
+			worker.systemLogger.Warnf("Pre-generated music not found for %s (err: %v). Fallback to standard finalization.", workflowID, err)
+			mixedData, err := worker.ttsProcessor.FinalizeAudio(ctx, combinedWavData, musicPrompt)
+			if err != nil {
+				worker.systemLogger.Errorf("Remote finalization failed: %v. Using speech only.", err)
+				finalWavData = combinedWavData
+			} else {
+				finalWavData = mixedData
+			}
 		}
+	} else {
+		finalWavData = combinedWavData
 	}
 
 	finalKey := fmt.Sprintf(FinalAudioKeyFormat, workflowID)
@@ -500,51 +534,6 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 	}
 
 	return nil
-}
-
-// concatenateWavsInMemory merges identical WAV files.
-// Duplicated logic from internal/audio/wav.go to avoid import cycles or large refactors.
-// Ideally this lives in a 'pkg/wav' utility.
-func (worker *NatsWorker) concatenateWavsInMemory(paths []string) ([]byte, error) {
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("no files")
-	}
-
-	// Minimal WAV Header (44 bytes)
-	// We read the first file's header to get format.
-	firstData, err := os.ReadFile(paths[0])
-	if err != nil {
-		return nil, err
-	}
-	if len(firstData) < 44 {
-		return nil, fmt.Errorf("invalid wav file")
-	}
-
-	header := make([]byte, 44)
-	copy(header, firstData[:44])
-
-	var body []byte
-	body = append(body, firstData[44:]...)
-
-	for i := 1; i < len(paths); i++ {
-		d, err := os.ReadFile(paths[i])
-		if err != nil {
-			return nil, err
-		}
-		if len(d) < 44 {
-			continue
-		}
-		// Append body only
-		body = append(body, d[44:]...)
-	}
-
-	totalSize := uint32(len(body))
-	// Update ChunkSize (Total - 8) @ offset 4
-	binary.LittleEndian.PutUint32(header[4:], 36+totalSize)
-	// Update Subchunk2Size (Data size) @ offset 40
-	binary.LittleEndian.PutUint32(header[40:], totalSize)
-
-	return append(header, body...), nil
 }
 
 func (worker *NatsWorker) publishCompletionEvent(ctx context.Context, event *events.AudioChunkCreatedEvent) error {
