@@ -93,3 +93,51 @@ func (m *Mixer) ConvertTo48k(ctx context.Context, inputPath string) ([]byte, err
 	return os.ReadFile(outputFile)
 }
 
+// Mix merges speech and background music into a final wav.
+// It loops the music track to match speech duration and ensures channel compatibility.
+func (m *Mixer) Mix(ctx context.Context, speechPath, musicPath string) ([]byte, error) {
+	outputFile := filepath.Join(os.TempDir(), fmt.Sprintf("mixed_%s.wav", filepath.Base(speechPath)))
+	defer func() {
+		// Clean up the output file on error, or rely on caller to manage the bytes.
+		// If we successfully read it into memory, we can delete it here.
+		if err := os.Remove(outputFile); err != nil && !os.IsNotExist(err) {
+			m.logger.Warnf("failed to remove temp file %s: %v", outputFile, err)
+		}
+	}()
+
+	// FFmpeg Filter Complex Breakdown:
+	// 1. [0:a] (Speech): Force Stereo, 48kHz, Boost Volume -> [s]
+	// 2. [1:a] (Music):  Force Stereo, 48kHz, Lower Volume -> [m]
+	// 3. [s][m] amix:    Mix them, end when speech ends (duration=first).
+	//
+	// Why 'aformat'? Mixing Mono speech with Stereo music often crashes ffmpeg
+	// or produces silent channels without explicit layout definitions.
+	filterComplex := `[0:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=1.5[s];[1:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=0.2[m];[s][m]amix=inputs=2:duration=first:dropout_transition=2`
+
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-y",
+		"-i", speechPath,
+		"-stream_loop", "-1", "-i", musicPath,
+		"-filter_complex", filterComplex,
+		"-c:a", "pcm_s16le",
+		"-ar", "48000",
+		outputFile,
+	)
+
+	// Capture combined output for debugging "With Love"
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Optimization: Return the actual ffmpeg error output in the error message
+		// so the developer doesn't have to hunt for logs.
+		// We truncate it to 500 chars to avoid blowing up logs, but keep the tail (where the error usually is).
+		logMsg := string(output)
+		if len(logMsg) > 500 {
+			logMsg = "..." + logMsg[len(logMsg)-500:]
+		}
+		
+		return nil, fmt.Errorf("ffmpeg mix failed: %w | Output: %s", err, logMsg)
+	}
+
+	return os.ReadFile(outputFile)
+}
+

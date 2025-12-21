@@ -15,6 +15,7 @@ import (
 	"github.com/book-expert/tts-service/internal/config"
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/book-expert/tts-service/internal/mixer"
+	"github.com/book-expert/tts-service/internal/music"
 	"github.com/book-expert/tts-service/internal/objectstore"
 	"github.com/book-expert/tts-service/internal/orchestrator"
 	"github.com/book-expert/tts-service/internal/worker"
@@ -111,16 +112,35 @@ func newApplication() (*Application, error) {
 		return nil, fmt.Errorf("failed to initialize Progress Key-Value Store: %w", kvStoreInitError)
 	}
 
-	// 6. Initialize Audio Orchestrator
+	// 6. Initialize Audio Orchestrator (Dependencies) 
+	
+	// 6a. Audio Client (Speech)
 	audioClient := audio.NewClient(serviceConfig.TTS.AudioServerURL, systemLogger)
 
+	// 6b. Music Client (Lyria)
+	musicApiKey := os.Getenv(serviceConfig.TTS.APIKeyEnvironmentVariable)
+	if musicApiKey == "" {
+		systemLogger.Warnf("Music API Key (%s) not found in env. Music generation will fail.", serviceConfig.TTS.APIKeyEnvironmentVariable)
+	}
+	musicClient, musicErr := music.NewClient(context.Background(), musicApiKey, systemLogger)
+	if musicErr != nil {
+		systemLogger.Errorf("Failed to initialize Music Client: %v", musicErr)
+		// We verify at runtime
+	}
+
+	// 6c. Mixer (FFmpeg)
 	audioMixer := mixer.New(systemLogger)
+
+	// 6d. Orchestrator
 	ttsOrchestrator := orchestrator.New(
 		audioClient,
+		musicClient,
 		audioMixer,
 		systemLogger,
 		serviceConfig.TTS.SpeechConcurrency,
-	) // 7. Create Worker
+	)
+
+	// 7. Create Worker
 	natsWorker, workerInitError := worker.NewNatsWorker(
 		natsConnection,
 		jetStreamContext,
@@ -131,11 +151,11 @@ func newApplication() (*Application, error) {
 		serviceConfig.NATS.Producer.SubjectName,
 		serviceConfig.NATS.DeadLetterQueueSubject,
 		textObjectStore,
-		ttsObjectStore,
+		ttsObjectStore, // CORRECT VARIABLE
 		progressKeyValueStore,
-		ttsOrchestrator, // Injects as core.TTSProcessor
+		ttsOrchestrator, // CORRECT VARIABLE
 		systemLogger,
-		1, // Forced to 1 to process one page at a time (chunks are parallelized internally)
+		1, // Forced to 1 to process one page at a time
 	)
 	if workerInitError != nil {
 		natsConnection.Close()

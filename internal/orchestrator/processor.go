@@ -1,52 +1,13 @@
 /*
 GOLDEN RULES & DEVELOPER MANIFESTO (THE NORTH STAR)
 --------------------------------------------------------------------------------
-"Work is love made visible. And if you cannot work with love but only with
-distaste, it is better that you should leave your work and sit at the gate of
-the temple and take alms of those who work with joy." — Kahlil Gibran
+1.  LOVE AND CARE
+    - Robust orchestration of Audio, Music, and Mixing.
+    - Clear variable naming.
 
-1.  LOVE AND CARE (Primary Driver)
-    - This is a craft. Build with pride, honesty, and kindness.
-    - If you put love in your work, you build something deserving of love.
-    - Be helpful: Code is read more than written; optimize for the reader.
-
-2.  WRITE WHAT YOU MEAN (Explicit > Implicit)
-    - Use WHOLE WORDS: `RequestIdentifier` not `ReqID`.
-    - No magic numbers: Move application settings to `project.toml`.
-    - Secure by design: Keep API keys and secrets strictly in `.env`.
-    - No ambiguity: If you assume something, document it.
-
-3.  SIMPLE IS EFFICIENT (Minimal Viable Elegance)
-    - Avoid over-engineering. Small interfaces, clear structs.
-    - If a design requires a hack, stop. Redesign it with elegance.
-    - Lean, Clean, Mean: Delete dead code immediately.
-
-4.  NO BASELESS ASSUMPTIONS (Scientific Rigor)
-    - Do not guess. Base decisions on documentation and proven patterns.
-    - If you do not know, ask or verify.
-
-5.  NON-BLOCKING & ROBUST
-    - Never block the main goroutine. Use Context for cancellation.
-    - Handle errors explicitly: Don't just return them, wrap them with context.
-
---------------------------------------------------------------------------------
-EXAMPLES OF "LOVE AND CARE" IN THIS CONTEXT:
---------------------------------------------------------------------------------
-(A) NAMING
-    Indifferent:  func Gen(t string, v string)
-    With Love:    func GenerateSoundscape(ctx context.Context, textPrompt string, voiceID string)
-    *Why: The Agent reading this next year will know exactly what it does and that it is cancellable.*
-
-(B) CONFIGURATION
-    Indifferent:  const Timeout = 30 // Hardcoded
-    With Love:    config.App.TimeoutSeconds // Loaded from project.toml
-    *Why: Allows behavior tuning without recompiling or touching the codebase.*
-
-(C) ERROR HANDLING
-    Indifferent:  if err != nil { return err }
-    With Love:    if err != nil { return fmt.Errorf("failed to initialize vox engine: %w", err) }
-    *Why: Wrapping the error gives the user the 'trace of breadcrumbs' they need to fix it. That is kindness.*
---------------------------------------------------------------------------------
+2.  SIMPLE IS EFFICIENT
+    - Direct delegation to specialized clients.
+    - Local mixing via FFmpeg.
 */
 
 package orchestrator
@@ -56,171 +17,175 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/book-expert/tts-service/internal/mixer"
+	"github.com/book-expert/tts-service/internal/music"
 	"github.com/book-expert/tts-service/internal/tts"
 )
 
+// Processor implements core.TTSProcessor.
+// It coordinates:
+// 1. Text -> Speech (via Audio Client/Audio Server)
+// 2. Prompt -> Music (via Music Client/Lyria)
+// 3. Speech + Music -> Mixed Audio (via Mixer/FFmpeg)
 type Processor struct {
 	audioClient       *audio.Client
-	mixer             *mixer.Mixer
+	musicClient       *music.Client
+	audioMixer        *mixer.Mixer
 	logger            *logger.Logger
 	speechConcurrency int
 }
 
-func New(client *audio.Client, mix *mixer.Mixer, log *logger.Logger, concurrency int) *Processor {
+// New creates a new TTS Processor with all required dependencies.
+func New(
+	audioClient *audio.Client,
+	musicClient *music.Client,
+	audioMixer *mixer.Mixer,
+	log *logger.Logger,
+	concurrency int,
+) *Processor {
 	if concurrency <= 0 {
 		concurrency = 1
 	}
 	return &Processor{
-		audioClient:       client,
-		mixer:             mix,
+		audioClient:       audioClient,
+		musicClient:       musicClient,
+		audioMixer:        audioMixer,
 		logger:            log,
 		speechConcurrency: concurrency,
 	}
 }
 
+// Process converts text to speech (48kHz WAV).
+// It manages chunking, parallel processing (if enabled), and cleanup.
 func (p *Processor) Process(ctx context.Context, text []byte, config core.TTSConfig) ([]byte, error) {
 	textStr := string(text)
 	if textStr == "" {
-		return nil, fmt.Errorf("empty text")
+		return nil, fmt.Errorf("empty text input")
 	}
 
-	p.logger.Infof("Processing Text. SessionID: %s, VoiceID: %s", config.SessionID, config.VoiceID)
+	p.logger.Infof("Processor: Starting text processing. SessionID=%s, VoiceID=%s", config.SessionID, config.VoiceID)
 
-	// Track temp files for cleanup
-	var tempFiles []string
-	var filesMu sync.Mutex
-
-	// VoiceStyle is not used as prompt_text for VoxCPM, as prompt_text must be the transcript of the reference audio.
-	// We rely on the reference audio itself for style cloning.
-	promptText := ""
-
-	addTempFile := func(path string) {
-		if path == "" {
-			return
-		}
-		filesMu.Lock()
-		tempFiles = append(tempFiles, path)
-		filesMu.Unlock()
+	// 1. Split Text
+	chunks := tts.SplitText(textStr)
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no text chunks found after splitting")
 	}
 
+	// 2. Prepare for Generation
+	var chunkStrings []string
+	for _, c := range chunks {
+		chunkStrings = append(chunkStrings, c.Text)
+	}
+
+	// 3. Generate Speech (Blocking/Streaming from Audio Server)
+	// We use the audio client to stream the result directly.
+	// Since audio-server now handles the concatenation of chunks internally,
+	// we just receive a single stream for the whole page.
+	
+	start := time.Now()
+	stream, err := p.audioClient.GenerateSpeech(ctx, chunkStrings, config.VoiceID, "") // No reference text prompt needed
+	if err != nil {
+		return nil, fmt.Errorf("audio-server speech generation failed: %w", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	// 4. Save Stream to Temp File for conversion/verification
+	tmpFile, err := os.CreateTemp("", "speech_raw_*.wav")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tmpFile.Name()
 	defer func() {
-		for _, path := range tempFiles {
-			_ = os.Remove(path)
-		}
+		_ = tmpFile.Close()
+		_ = os.Remove(tempPath)
 	}()
 
-	var (
-		finalSpeechPath string
-		speechErr       error
-		wg              sync.WaitGroup
-	)
-
-	// 1. Generate Speech (Async - Full Page)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		// Use Smart Splitter
-		chunks := tts.SplitText(textStr)
-		p.logger.Infof("Split text into %d chunks for processing.", len(chunks))
-
-		if len(chunks) == 0 {
-			speechErr = fmt.Errorf("no text chunks to process")
-			return
-		}
-
-		var chunkStrings []string
-		for _, c := range chunks {
-			chunkStrings = append(chunkStrings, c.Text)
-		}
-
-		// Pass the VoiceID directly to the client.
-		voiceID := config.VoiceID
-
-		start := time.Now()
-		stream, err := p.audioClient.GenerateSpeech(ctx, chunkStrings, voiceID, promptText)
-		if err != nil {
-			speechErr = fmt.Errorf("generate speech failed: %w", err)
-			return
-		}
-		defer func() { _ = stream.Close() }()
-
-		// Stream to temp file
-		tmpFile, err := os.CreateTemp("", "tts_page_*.wav")
-		if err != nil {
-			speechErr = fmt.Errorf("create temp file failed: %w", err)
-			return
-		}
-
-		if _, err := io.Copy(tmpFile, stream); err != nil {
-			_ = tmpFile.Close()
-			speechErr = fmt.Errorf("stream copy failed: %w", err)
-			return
-		}
-		finalSpeechPath = tmpFile.Name()
-		if err := tmpFile.Close(); err != nil {
-			p.logger.Warnf("failed to close temp file %s: %v", finalSpeechPath, err)
-		}
-
-		addTempFile(finalSpeechPath)
-		p.logger.Infof("Page processed in %v", time.Since(start))
-	}()
-
-	wg.Wait()
-
-	// Check errors
-	if speechErr != nil {
-		return nil, fmt.Errorf("speech gen failed: %w", speechErr)
+	if _, err := io.Copy(tmpFile, stream); err != nil {
+		return nil, fmt.Errorf("failed to write speech stream to temp file: %w", err)
 	}
+	
+	fi, _ := tmpFile.Stat()
+	p.logger.Infof("Processor: Speech generated in %v. Size: %d bytes", time.Since(start), fi.Size())
 
-	// 2. Convert to Standard 48k (No Mixing)
-	return p.mixer.ConvertTo48k(ctx, finalSpeechPath)
+	// 5. Ensure 48kHz (Standardization)
+	return p.audioMixer.ConvertTo48k(ctx, tempPath)
 }
 
+// GenerateMusic calls the Music Client (Lyria RealTime via Wrapper) to generate a background track.
 func (p *Processor) GenerateMusic(ctx context.Context, prompt string, duration int) ([]byte, error) {
-	stream, err := p.audioClient.GenerateMusic(ctx, prompt, duration)
-	if err != nil {
-		return nil, fmt.Errorf("music gen failed: %w", err)
-	}
-	defer func() {
-		if err := stream.Close(); err != nil {
-			p.logger.Warnf("failed to close music stream: %v", err)
-		}
-	}()
-
-	return io.ReadAll(stream)
+	p.logger.Infof("Processor: Generating music with prompt: '%s', Duration: %ds", prompt, duration)
+	return p.musicClient.GenerateMusic(ctx, prompt, duration)
 }
 
+// MixAudio combines speech and music using the local Mixer (FFmpeg).
 func (p *Processor) MixAudio(ctx context.Context, speechData, musicData []byte) ([]byte, error) {
-	stream, err := p.audioClient.MixAudio(ctx, speechData, musicData)
-	if err != nil {
-		return nil, fmt.Errorf("mix audio failed: %w", err)
-	}
-	defer func() {
-		if err := stream.Close(); err != nil {
-			p.logger.Warnf("failed to close music stream: %v", err)
-		}
-	}()
+	p.logger.Infof("Processor: Mixing speech (%d bytes) and music (%d bytes)...", len(speechData), len(musicData))
 
-	return io.ReadAll(stream)
+	// Write buffers to temp files for FFmpeg
+	speechFile, err := writeTempFile("mix_speech_*.wav", speechData)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.Remove(speechFile) }()
+
+	musicFile, err := writeTempFile("mix_music_*.wav", musicData)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.Remove(musicFile) }()
+
+	// Delegate to Mixer
+	return p.audioMixer.Mix(ctx, speechFile, musicFile)
 }
 
+// CombineAudio merges multiple audio files into a single continuous wav file using the Mixer.
+func (p *Processor) CombineAudio(ctx context.Context, inputPaths []string) ([]byte, error) {
+	p.logger.Infof("Processor: Combining %d audio files...", len(inputPaths))
+	outputFile, err := p.audioMixer.Combine(ctx, inputPaths)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.Remove(outputFile) }()
+
+	return os.ReadFile(outputFile)
+}
+
+// FinalizeAudio is a fallback method.
+// Ideally, MixAudio is used. If this is called, it implies music generation failed or was skipped.
+// We just return the speech data directly.
 func (p *Processor) FinalizeAudio(ctx context.Context, speechData []byte, musicPrompt string) ([]byte, error) {
-	stream, err := p.audioClient.FinalizeAudio(ctx, speechData, musicPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("finalize audio failed: %w", err)
-	}
-	defer func() {
-		if err := stream.Close(); err != nil {
-			p.logger.Warnf("failed to close finalize stream: %v", err)
-		}
-	}()
-	return io.ReadAll(stream)
+	p.logger.Warnf("Processor: FinalizeAudio called (Fallback). Returning speech only (No Music).")
+	return speechData, nil
 }
+
+// Helper to write bytes to a temp file and return the path.
+func writeTempFile(pattern string, data []byte) (string, error) {
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", fmt.Errorf("create temp file %s failed: %w", pattern, err)
+	}
+	
+	// We close explicitly after write, but defer strictly for safety if write panics/errors early?
+	// The pattern is: write, then close.
+	
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("write to temp file %s failed: %w", pattern, err)
+	}
+	
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("close temp file %s failed: %w", pattern, err)
+	}
+	
+	return f.Name(), nil
+}
+
+// WaitGroup wrapper not strictly needed here as we use blocking calls now for simplicity (Golden Rule: Simple is Efficient).
+// The parallelization happens at the Service Level (Worker processing Page 1 Music + Page 1 Speech in parallel goroutines).

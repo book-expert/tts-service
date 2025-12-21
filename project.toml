@@ -1,6 +1,6 @@
 [service]
 log_dir = "/home/niko/development/logs/tts-logs"
-workers = 2
+workers = 3
 
 [tts]
 api_key_variable = "GEMINI_API_KEY"

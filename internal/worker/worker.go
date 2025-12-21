@@ -478,8 +478,8 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 		chunkPaths = append(chunkPaths, chunkPath)
 	}
 
-	// 2. Concatenate (Pure Go)
-	combinedWavData, err := audio.ConcatenateWavs(chunkPaths)
+	// 2. Concatenate (via Processor -> Mixer -> FFmpeg)
+	combinedWavData, err := worker.ttsProcessor.CombineAudio(ctx, chunkPaths)
 	if err != nil {
 		return fmt.Errorf("wav concatenation failed: %w", err)
 	}

@@ -71,5 +71,6 @@ type TTSProcessor interface {
 	Process(ctx context.Context, text []byte, config TTSConfig) ([]byte, error)
 	GenerateMusic(ctx context.Context, prompt string, duration int) ([]byte, error)
 	MixAudio(ctx context.Context, speechData, musicData []byte) ([]byte, error)
+	CombineAudio(ctx context.Context, inputPaths []string) ([]byte, error)
 	FinalizeAudio(ctx context.Context, speechData []byte, musicPrompt string) ([]byte, error)
 }

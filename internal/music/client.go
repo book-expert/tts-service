@@ -2,78 +2,89 @@
 GOLDEN RULES & DEVELOPER MANIFESTO (THE NORTH STAR)
 --------------------------------------------------------------------------------
 1.  LOVE AND CARE
-    - Proper error handling and context propagation.
-    - Clean interface for music generation.
+    - Robust execution of external Python wrapper.
+    - Clear error messages.
 
 2.  SIMPLE IS EFFICIENT
-    - Use official SDK.
-    - Handle Lyria 2 specifics (48kHz, 32.8s clips).
+    - Delegation to Python for experimental Lyria features.
 */
 
 package music
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/book-expert/logger"
-	"google.golang.org/genai"
 )
 
 type Client struct {
-	genaiClient *genai.Client
-	modelID     string
+	apiKey      string
+	wrapperPath string
 	logger      *logger.Logger
 }
 
 func NewClient(ctx context.Context, apiKey string, log *logger.Logger) (*Client, error) {
-	// Initialize GenAI Client
-	// Note: For Vertex AI, we might need ProjectID/Location if not using API Key.
-	// Assuming API Key works for now based on user context.
-	
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: apiKey,
-		Backend: genai.BackendVertexAI, // Explicitly use Vertex AI for Lyria
-		Project: os.Getenv("GOOGLE_CLOUD_PROJECT"), 
-		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
-	})
+	// Locate wrapper.py
+	// We assume CWD is the service root (tts-service/)
+	wrapperPath, err := filepath.Abs("internal/music/wrapper.py")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create genai client: %w", err)
+		return nil, fmt.Errorf("failed to resolve wrapper path: %w", err)
+	}
+	
+	if _, err := os.Stat(wrapperPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("wrapper.py not found at %s", wrapperPath)
 	}
 
 	return &Client{
-		genaiClient: client,
-		modelID:     "lyria-002",
+		apiKey:      apiKey,
+		wrapperPath: wrapperPath,
 		logger:      log,
 	}, nil
 }
 
-// GenerateMusic generates a music track from the prompt using Lyria 2.
-// Returns the WAV audio data (48kHz, ~32s).
-func (c *Client) GenerateMusic(ctx context.Context, prompt string) ([]byte, error) {
-	c.logger.Infof("Generating music with %s. Prompt: %s", c.modelID, prompt)
+// GenerateMusic generates a music track from the prompt using Lyria RealTime (via Python Wrapper).
+func (c *Client) GenerateMusic(ctx context.Context, prompt string, durationSeconds int) ([]byte, error) {
+	c.logger.Infof("Generating music via wrapper. Prompt: %s, Duration: %ds", prompt, durationSeconds)
 
-	// Lyria 2 infers BPM and style directly from the text prompt.
-	resp, err := c.genaiClient.Models.GenerateContent(ctx, c.modelID, genai.Text(prompt), nil)
+	// Temp Output File
+	tmpFile, err := os.CreateTemp("", "lyria_music_*.wav")
 	if err != nil {
-		return nil, fmt.Errorf("genai request failed: %w", err)
+		return nil, fmt.Errorf("create temp file failed: %w", err)
+	}
+	outputFile := tmpFile.Name()
+	tmpFile.Close() // Close immediately so python can write to it
+	defer os.Remove(outputFile)
+
+	// Execute Python Wrapper
+	// We use the 'python3' from the environment (assuming sourced .venv or global)
+	cmd := exec.CommandContext(ctx, "python3", c.wrapperPath,
+		"--api-key", c.apiKey,
+		"--prompt", prompt,
+		"--output", outputFile,
+		"--duration", fmt.Sprintf("%d", durationSeconds),
+	)
+
+	// Capture stderr for debugging
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("wrapper execution failed: %w, output: %s", err, string(out))
 	}
 
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("no content generated")
+	c.logger.Infof("Wrapper finished. Output: %s", string(out))
+
+	// Read Result
+	data, err := os.ReadFile(outputFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read generated music file: %w", err)
 	}
 
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if part.InlineData != nil {
-			c.logger.Infof("Received audio data. MimeType: %s", part.InlineData.MimeType)
-			return part.InlineData.Data, nil
-		}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("generated music file is empty")
 	}
-	
-	jsonData, _ := json.Marshal(resp)
-	c.logger.Warnf("Full response (no InlineData found): %s", string(jsonData))
-	
-	return nil, fmt.Errorf("no audio data found in response")
+
+	return data, nil
 }
