@@ -63,7 +63,6 @@ import (
 	"time"
 
 	"github.com/book-expert/logger"
-	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/book-expert/tts-service/internal/events"
 	"github.com/nats-io/nats.go"

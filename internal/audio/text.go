@@ -49,7 +49,7 @@ EXAMPLES OF "LOVE AND CARE" IN THIS CONTEXT:
 --------------------------------------------------------------------------------
 */
 
-package tts
+package audio
 
 import (
 	"strings"

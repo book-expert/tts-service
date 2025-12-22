@@ -9,7 +9,7 @@ GOLDEN RULES & DEVELOPER MANIFESTO (THE NORTH STAR)
     - Delegation to Python for experimental Lyria features.
 */
 
-package music
+package audio
 
 import (
 	"context"
@@ -21,16 +21,16 @@ import (
 	"github.com/book-expert/logger"
 )
 
-type Client struct {
+type MusicClient struct {
 	apiKey      string
 	wrapperPath string
 	logger      *logger.Logger
 }
 
-func NewClient(ctx context.Context, apiKey string, log *logger.Logger) (*Client, error) {
+func NewMusicClient(ctx context.Context, apiKey string, log *logger.Logger) (*MusicClient, error) {
 	// Locate wrapper.py
 	// We assume CWD is the service root (tts-service/)
-	wrapperPath, err := filepath.Abs("internal/music/wrapper.py")
+	wrapperPath, err := filepath.Abs("internal/audio/wrapper.py")
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve wrapper path: %w", err)
 	}
@@ -39,7 +39,7 @@ func NewClient(ctx context.Context, apiKey string, log *logger.Logger) (*Client,
 		return nil, fmt.Errorf("wrapper.py not found at %s", wrapperPath)
 	}
 
-	return &Client{
+	return &MusicClient{
 		apiKey:      apiKey,
 		wrapperPath: wrapperPath,
 		logger:      log,
@@ -47,7 +47,7 @@ func NewClient(ctx context.Context, apiKey string, log *logger.Logger) (*Client,
 }
 
 // GenerateMusic generates a music track from the prompt using Lyria RealTime (via Python Wrapper).
-func (c *Client) GenerateMusic(ctx context.Context, prompt string, durationSeconds int) ([]byte, error) {
+func (c *MusicClient) GenerateMusic(ctx context.Context, prompt string, durationSeconds int) ([]byte, error) {
 	c.logger.Infof("Generating music via wrapper. Prompt: %s, Duration: %ds", prompt, durationSeconds)
 
 	// Temp Output File
@@ -56,8 +56,8 @@ func (c *Client) GenerateMusic(ctx context.Context, prompt string, durationSecon
 		return nil, fmt.Errorf("create temp file failed: %w", err)
 	}
 	outputFile := tmpFile.Name()
-	tmpFile.Close() // Close immediately so python can write to it
-	defer os.Remove(outputFile)
+	_ = tmpFile.Close() // Close immediately so python can write to it
+	defer func() { _ = os.Remove(outputFile) }()
 
 	// Execute Python Wrapper
 	// We use the 'python3' from the environment (assuming sourced .venv or global)

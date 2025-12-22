@@ -14,10 +14,7 @@ import (
 	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/config"
 	"github.com/book-expert/tts-service/internal/core"
-	"github.com/book-expert/tts-service/internal/mixer"
-	"github.com/book-expert/tts-service/internal/music"
 	"github.com/book-expert/tts-service/internal/objectstore"
-	"github.com/book-expert/tts-service/internal/orchestrator"
 	"github.com/book-expert/tts-service/internal/worker"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -112,28 +109,32 @@ func newApplication() (*Application, error) {
 		return nil, fmt.Errorf("failed to initialize Progress Key-Value Store: %w", kvStoreInitError)
 	}
 
-	// 6. Initialize Audio Orchestrator (Dependencies) 
+	// 6. Initialize Audio Orchestrator (Dependencies)
 	
 	// 6a. Audio Client (Speech)
-	audioClient := audio.NewClient(serviceConfig.TTS.AudioServerURL, systemLogger)
+	// Rename to SpeechClient to match new interface
+	speechClient := audio.NewSpeechClient(serviceConfig.TTS.AudioServerURL, systemLogger)
 
 	// 6b. Music Client (Lyria)
 	musicApiKey := os.Getenv(serviceConfig.TTS.APIKeyEnvironmentVariable)
 	if musicApiKey == "" {
 		systemLogger.Warnf("Music API Key (%s) not found in env. Music generation will fail.", serviceConfig.TTS.APIKeyEnvironmentVariable)
 	}
-	musicClient, musicErr := music.NewClient(context.Background(), musicApiKey, systemLogger)
+	// Use consolidated audio package
+	musicClient, musicErr := audio.NewMusicClient(context.Background(), musicApiKey, systemLogger)
 	if musicErr != nil {
 		systemLogger.Errorf("Failed to initialize Music Client: %v", musicErr)
 		// We verify at runtime
 	}
 
 	// 6c. Mixer (FFmpeg)
-	audioMixer := mixer.New(systemLogger)
+	// Use consolidated audio package
+	audioMixer := audio.NewMixer(systemLogger)
 
-	// 6d. Orchestrator
-	ttsOrchestrator := orchestrator.New(
-		audioClient,
+	// 6d. Processor (formerly Orchestrator)
+	// Use consolidated audio package
+	ttsProcessor := audio.NewProcessor(
+		speechClient,
 		musicClient,
 		audioMixer,
 		systemLogger,
@@ -153,7 +154,7 @@ func newApplication() (*Application, error) {
 		textObjectStore,
 		ttsObjectStore, // CORRECT VARIABLE
 		progressKeyValueStore,
-		ttsOrchestrator, // CORRECT VARIABLE
+		ttsProcessor, // CORRECT VARIABLE
 		systemLogger,
 		1, // Forced to 1 to process one page at a time
 	)

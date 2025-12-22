@@ -11,7 +11,11 @@ This service consumes `texts.processed` events and coordinates with the **Audio 
 3.  **Mixing**: Uses FFmpeg to mix the speech with the generated music loop.
     -   **Boosting**: Speech is boosted (1.5x) to cut through the mix.
     -   **Looping**: Music (0.15x volume) is looped seamlessly to match speech duration.
-4.  **Aggregation**: Stitches all chunks into a final page audio file.
+4.  **Silence Management ("Sandwich & Press")**:
+    -   **Sandwich**: Prepend and Append 1s silence to every page (Guarantees >2s gap between pages).
+    -   **Press**: Truncate all silences >1s in the final mix to exactly 1s.
+    -   **Result**: Uniform, natural pausing between all pages and sentences.
+5.  **Aggregation**: Stitches all chunks into a final page audio file.
 
 ## Architecture
 

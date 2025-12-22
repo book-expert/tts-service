@@ -57,7 +57,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"time"
 
@@ -70,14 +69,14 @@ const (
 	EndpointMusic  = "/music"
 )
 
-type Client struct {
+type SpeechClient struct {
 	baseURL    string
 	httpClient *http.Client
 	logger     *logger.Logger
 }
 
-func NewClient(baseURL string, log *logger.Logger) *Client {
-	return &Client{
+func NewSpeechClient(baseURL string, log *logger.Logger) *SpeechClient {
+	return &SpeechClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: RequestTimeout,
@@ -100,7 +99,7 @@ type MusicRequest struct {
 
 // GenerateSpeech calls the audio-server to generate speech.
 // It returns a stream of the WAV audio. The caller is responsible for closing the stream.
-func (c *Client) GenerateSpeech(ctx context.Context, chunks []string, voiceID, promptText string) (io.ReadCloser, error) {
+func (c *SpeechClient) GenerateSpeech(ctx context.Context, chunks []string, voiceID, promptText string) (io.ReadCloser, error) {
 	payload := SpeechRequest{
 		Chunks:     chunks,
 		VoiceID:    voiceID,
@@ -110,112 +109,8 @@ func (c *Client) GenerateSpeech(ctx context.Context, chunks []string, voiceID, p
 	return c.postRequest(ctx, EndpointSpeech, payload)
 }
 
-// GenerateMusic calls the audio-server to generate a single music track.
-// It returns a stream of the WAV audio. The caller is responsible for closing the stream.
-func (c *Client) GenerateMusic(ctx context.Context, prompt string, duration int) (io.ReadCloser, error) {
-	payload := MusicRequest{
-		Prompt:      prompt,
-		DurationSec: duration,
-	}
 
-	return c.postRequest(ctx, EndpointMusic, payload)
-}
-
-// MixAudio calls the audio-server to mix speech and music.
-func (c *Client) MixAudio(ctx context.Context, speechData, musicData []byte) (io.ReadCloser, error) {
-	url := c.baseURL + "/mix"
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	// Add Speech
-	part, err := writer.CreateFormFile("speech", "speech.wav")
-	if err != nil {
-		return nil, fmt.Errorf("create speech part: %w", err)
-	}
-	if _, err := part.Write(speechData); err != nil {
-		return nil, fmt.Errorf("write speech data: %w", err)
-	}
-
-	// Add Music
-	part, err = writer.CreateFormFile("music", "music.wav")
-	if err != nil {
-		return nil, fmt.Errorf("create music part: %w", err)
-	}
-	if _, err := part.Write(musicData); err != nil {
-		return nil, fmt.Errorf("write music data: %w", err)
-	}
-
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("close multipart writer: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("audio server error (%d): %s", resp.StatusCode, string(body))
-	}
-
-	return resp.Body, nil
-}
-
-// FinalizeAudio calls the audio-server to generate music for the given speech and mix them.
-func (c *Client) FinalizeAudio(ctx context.Context, speechData []byte, musicPrompt string) (io.ReadCloser, error) {
-	url := c.baseURL + "/finalize"
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	// Add Speech
-	part, err := writer.CreateFormFile("speech", "speech.wav")
-	if err != nil {
-		return nil, fmt.Errorf("create speech part: %w", err)
-	}
-	if _, err := part.Write(speechData); err != nil {
-		return nil, fmt.Errorf("write speech data: %w", err)
-	}
-
-	// Add Music Prompt
-	if err := writer.WriteField("music_prompt", musicPrompt); err != nil {
-		return nil, fmt.Errorf("write music prompt: %w", err)
-	}
-
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("close multipart writer: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("audio server error (%d): %s", resp.StatusCode, string(body))
-	}
-
-	return resp.Body, nil
-}
-
-func (c *Client) postRequest(ctx context.Context, endpoint string, payload interface{}) (io.ReadCloser, error) {
+func (c *SpeechClient) postRequest(ctx context.Context, endpoint string, payload interface{}) (io.ReadCloser, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
