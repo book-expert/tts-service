@@ -33,19 +33,19 @@ func NewMixer(log *logger.Logger) *Mixer {
 	return &Mixer{logger: log}
 }
 
-// Sanitize enforces the "Gold Standard" format (48kHz, 16-bit, Stereo) using SoX.
+// Sanitize enforces the "Gold Standard" format (48kHz, 24-bit, Stereo) using SoX.
 // This is the "Surgeon" step of the Safe Stitch Protocol.
 // It returns the path to the sanitized file. The caller is responsible for cleanup.
 func (m *Mixer) Sanitize(ctx context.Context, inputPath string) (string, error) {
 	outputPath := filepath.Join(os.TempDir(), fmt.Sprintf("clean_%s.wav", filepath.Base(inputPath)))
 
 	// BKM-01: Sanitize using SoX
-	// sox input.wav -r 48000 -c 2 -b 16 output.wav
+	// sox input.wav -r 48000 -c 2 -b 24 output.wav
 	cmd := exec.CommandContext(ctx, "sox",
 		inputPath,
 		"-r", "48000",
 		"-c", "2",
-		"-b", "16",
+		"-b", "24",
 		outputPath,
 	)
 
@@ -72,7 +72,7 @@ func (m *Mixer) TruncateSilence(ctx context.Context, inputPath string, maxSecond
 		"-y",
 		"-i", inputPath,
 		"-af", filter,
-		"-c:a", "pcm_s16le", // Ensure consistent output format
+		"-c:a", "pcm_s24le", // High-Res 24-bit output
 		"-ar", "48000",
 		outputPath,
 	)
@@ -166,7 +166,7 @@ func (m *Mixer) Mix(ctx context.Context, speechPath, musicPath string) ([]byte, 
 		"-i", speechPath,
 		"-stream_loop", "-1", "-i", musicPath,
 		"-filter_complex", filterComplex,
-		"-c:a", "pcm_s16le",
+		"-c:a", "pcm_s24le", // High-Res 24-bit output
 		"-ar", "48000",
 		outputFile,
 	)
