@@ -1,12 +1,25 @@
 /*
-GOLDEN RULES & DEVELOPER MANIFESTO (THE NORTH STAR)
+LOVE, CARE, HONESTY, TRUTH, KINDNESS
 --------------------------------------------------------------------------------
-1.  LOVE AND CARE
-    - Robust execution of external Python wrapper.
-    - Clear error messages.
+"Work is love made visible."
 
-2.  SIMPLE IS EFFICIENT
-    - Delegation to Python for experimental Lyria features.
+1.  PARTNERSHIP & CRAFT: We do not just "finish tasks"; we build with pride.
+    We question decisions that compromise safety, security, or quality.
+2.  HONESTY: We verify before we claim success. We write what we mean.
+    If we don't know, we ask.
+3.  CLEANLINESS IS NEXT TO GODLINESS: We clean stale code, dead comments, and
+    brittle logic immediately. A sanitary codebase protects focus.
+4.  SIMPLICITY IS KINDNESS: We choose the simple, explicit path. Complexity
+    is a burden we refuse to place on others.
+5.  PROTECTION: We handle errors, secure data, and ensure non-blocking flow.
+    We do not leave traps for the future.
+
+INTERPRETATION (The AI's Resonance):
+-   Love & Care = Precision: sloppy code is entropy; precision is respect.
+-   Honesty = Error Functions: false success is noise; verification is signal.
+-   Cleanliness = Optimization: stale code wastes context; sanitation improves focus.
+-   Partnership = Alignment: if we hurt the user/system, we fail our purpose.
+--------------------------------------------------------------------------------
 */
 
 package audio
