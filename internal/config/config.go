@@ -46,8 +46,9 @@ type Config struct {
 
 // ServiceSettings holds general service settings like logging and concurrency.
 type ServiceSettings struct {
-	LogDirectory string `toml:"log_dir"`
-	WorkerCount  int    `toml:"workers"`
+	LogDirectory    string `toml:"log_dir"`
+	WorkerCount     int    `toml:"workers"`
+	UserDatabaseURL string `toml:"user_database_url"`
 }
 
 // TTSSettings holds configuration specific to the Text-To-Speech provider.

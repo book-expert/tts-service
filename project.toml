@@ -1,6 +1,7 @@
 [service]
 log_dir = "/home/niko/development/logs/tts-logs"
 workers = 3
+user_database_url = "http://localhost:8085"
 
 [tts]
 api_key_variable = "GEMINI_API_KEY"

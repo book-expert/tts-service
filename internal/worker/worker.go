@@ -25,10 +25,12 @@ INTERPRETATION (The AI's Resonance):
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,6 +106,8 @@ type NatsWorker struct {
 	ttsProcessor           core.TTSProcessor
 	systemLogger           *logger.Logger
 	workerCount            int
+    userDBBaseURL          string
+    httpClient             *http.Client
 }
 
 // NewNatsWorker initializes a new NatsWorker with all necessary dependencies.
@@ -122,6 +126,7 @@ func NewNatsWorker(
 	ttsProcessor core.TTSProcessor,
 	systemLogger *logger.Logger,
 	workerCount int,
+    userDBBaseURL string,
 ) (*NatsWorker, error) {
 	if workerCount < 1 {
 		workerCount = 1
@@ -141,6 +146,8 @@ func NewNatsWorker(
 		ttsProcessor:           ttsProcessor,
 		systemLogger:           systemLogger,
 		workerCount:            workerCount,
+        userDBBaseURL:          userDBBaseURL,
+        httpClient:             &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
@@ -490,6 +497,62 @@ func (worker *NatsWorker) aggregateAndFinalizeWorkflow(
 
 	finalKey := fmt.Sprintf(FinalAudioKeyFormat, workflowID)
 
+    // Upload to user-database-service (Artifacts Storage)
+    if worker.userDBBaseURL != "" {
+        uploadURL := fmt.Sprintf("%s/v1/artifacts/%s", worker.userDBBaseURL, workflowID)
+        req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, bytes.NewReader(finalWavData))
+        if err != nil {
+             // Log error but try to continue to NATS fallback or just log
+             worker.systemLogger.Errorf("Failed to create upload request to user-db: %v", err)
+        } else {
+            req.Header.Set("Content-Type", "audio/wav")
+            resp, err := worker.httpClient.Do(req)
+            if err != nil {
+                 worker.systemLogger.Errorf("Failed to upload artifact to user-db: %v", err)
+            } else {
+                 defer func() {
+                     _ = resp.Body.Close()
+                 }()
+                 if resp.StatusCode != http.StatusCreated {
+                      worker.systemLogger.Errorf("User-db upload failed with status: %d", resp.StatusCode)
+                 } else {
+                      worker.systemLogger.Infof("Successfully moved artifact %s to user-database-service", workflowID)
+                      // If successful, we do NOT need to keep it in NATS ObjectStore permanently.
+                      // However, the current flow expects it in NATS ObjectStore for the completion event?
+                      // The CompletionEvent has 'AudioKey'. If we don't upload to NATS, checking AudioKey might fail if consumers look in NATS.
+                      // But the prompt says "Then delete from NATS".
+                      // So we should Upload to NATS (for immediate consistency if needed) then Delete?
+                      // Or just Skip NATS upload?
+                      // If we skip NATS upload, we must ensure consumers know where to look.
+                      // The UI was updated to look in UserDB.
+                      // So we can SKIP the NATS upload if UserDB upload succeeds.
+                      
+                      // For safety (Golden Rule: Protection), let's SKIP NATS upload if UserDB upload works.
+                      // If UserDB upload fails, fallback to NATS?
+                      
+                      // Actually, let's keep NATS upload for now to match the "Move" semantics (Copy -> Delete).
+                      // But since we have the data in memory, we can just not put it there.
+                      
+                      // Wait, the prompt said: "Upload final.wav to user-database-service. Then delete from NATS."
+                      // This implies it might have been there?
+                      // But here we are creating it.
+                      // So "Store in UserDB, Do Not Store in NATS" is the equivalent of "Move" for a new file.
+                      // So we will return early if successful.
+                      
+                      completionEvent := &events.AudioChunkCreatedEvent{
+                           Header:     header,
+                           AudioKey:   workflowID, // We use ID as key
+                           PageNumber: 0,
+                           TotalPages: totalPages,
+                      }
+                      
+                      return worker.publishCompletionEvent(ctx, completionEvent)
+                 }
+            }
+        }
+    }
+
+    // Fallback or Standard: Upload to NATS if UserDB upload failed or not configured
 	if err := worker.audioObjectStore.Upload(ctx, finalKey, finalWavData); err != nil {
 		return fmt.Errorf("upload final WAV failed: %w", err)
 	}

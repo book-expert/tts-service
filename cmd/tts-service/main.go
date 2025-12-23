@@ -181,6 +181,7 @@ func newApplication() (*Application, error) {
 		ttsProcessor, // CORRECT VARIABLE
 		systemLogger,
 		1, // Forced to 1 to process one page at a time
+        serviceConfig.Service.UserDatabaseURL,
 	)
 	if workerInitError != nil {
 		natsConnection.Close()
