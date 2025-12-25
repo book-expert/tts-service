@@ -1,0 +1,8 @@
+# Binaries
+/tts-service
+*.exe
+*.test
+__pycache__/
+
+# OS
+.DS_Store
