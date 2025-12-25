@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/book-expert/logger"
+	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/book-expert/tts-service/internal/events"
 	"github.com/nats-io/nats.go"
@@ -321,7 +322,7 @@ func (worker *NatsWorker) executeTTSJob(ctx context.Context, event *events.TextP
 	var audioData []byte
 	if strings.Contains(string(cleanText), NoSpeechMarker) {
 		worker.systemLogger.Infof("Skipping TTS for Page %d (Marked as %s). Using 1s silence.", event.PageNumber, NoSpeechMarker)
-		audioData = generateSilentWav(1*time.Second, AudioSampleRateHz, 1, 32)
+		audioData = audio.GenerateSilentWav(1*time.Second, AudioSampleRateHz, 1, 32)
 	} else {
 		var err error
 		audioData, err = worker.ttsProcessor.Process(ctx, cleanText, ttsConfiguration)
