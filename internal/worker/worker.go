@@ -76,6 +76,15 @@ const (
 	// KeyValueKeyFormat defines the key format for storing progress in the KV store.
 	KeyValueKeyFormat = "%s.page.%d"
 
+	// TotalPagesKeyFormat defines the key format for storing total pages.
+	TotalPagesKeyFormat = "%s.total_pages"
+
+	// MusicRequestedKeyFormat defines the key format for marking that music was requested.
+	MusicRequestedKeyFormat = "%s.music.requested"
+
+	// MusicReadyKeyFormat defines the key format for marking that music is ready.
+	MusicReadyKeyFormat = "%s.music.ready"
+
 	// AudioChunkKeyFormat defines the naming convention for individual page audio chunks in the Object Store.
 	AudioChunkKeyFormat = "%s_page_%d.pcm"
 
@@ -118,6 +127,7 @@ type Worker struct {
 	ttsProcessor              core.TTSProcessor
 	logger                    *logger.Logger
 	workerCount               int
+	waitGroup                 sync.WaitGroup
 	userDatabaseBaseURL       string
 	httpClient                *http.Client
 }
@@ -175,39 +185,54 @@ func New(
 
 // Run executes the main worker loop.
 func (worker *Worker) Run(context context.Context) error {
-	stream, err := worker.jetStream.Stream(context, worker.subscriptionStream)
-	if err != nil {
-		return fmt.Errorf("failed to retrieve stream %s: %w", worker.subscriptionStream, err)
-	}
-
-	consumerConfig := jetstream.ConsumerConfig{
-		Durable:       worker.consumerDurableName,
-		FilterSubject: worker.subscriptionSubject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-	}
-
-	consumer, err := stream.CreateOrUpdateConsumer(context, consumerConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create or update consumer %s: %w", worker.consumerDurableName, err)
-	}
-
-	worker.logger.Infof("Worker running on subject %s with %d concurrent workers.", worker.subscriptionSubject, worker.workerCount)
-
-	var waitGroup sync.WaitGroup
-
+	// 1. Subscribe to Text Processing Stream (N Workers)
 	for i := 0; i < worker.workerCount; i++ {
-		waitGroup.Add(1)
-		go func(workerID int) {
-			defer waitGroup.Done()
-			worker.consumeLoop(context, consumer, workerID)
-		}(i)
+		if err := worker.bindAndConsume(context, worker.subscriptionStream, worker.subscriptionSubject, worker.consumerDurableName, worker.processMessage); err != nil {
+			return err
+		}
 	}
 
-	waitGroup.Wait()
+	// 2. Subscribe to Music Creation Stream (Single Listener)
+	if worker.musicCreatedSubject != "" {
+		if err := worker.bindAndConsume(context, worker.subscriptionStream, worker.musicCreatedSubject, "tts-music-result-consumer", worker.handleMusicCreatedMessage); err != nil {
+			return err
+		}
+	}
+
+	worker.logger.Infof("Worker online with %d text workers and 1 music listener.", worker.workerCount)
+	worker.waitGroup.Wait()
 	return nil
 }
 
-func (worker *Worker) consumeLoop(context context.Context, consumer jetstream.Consumer, workerID int) {
+func (worker *Worker) bindAndConsume(
+	context context.Context,
+	streamName, subject, durableName string,
+	handler func(parentContext context.Context, message jetstream.Msg),
+) error {
+	stream, err := worker.jetStream.Stream(context, streamName)
+	if err != nil {
+		return fmt.Errorf("failed to bind stream %s: %w", streamName, err)
+	}
+
+	consumer, err := stream.CreateOrUpdateConsumer(context, jetstream.ConsumerConfig{
+		Durable:       durableName,
+		FilterSubject: subject,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create consumer %s: %w", durableName, err)
+	}
+
+	worker.waitGroup.Add(1)
+	go func() {
+		defer worker.waitGroup.Done()
+		worker.consumeLoop(context, consumer, handler)
+	}()
+
+	return nil
+}
+
+func (worker *Worker) consumeLoop(context context.Context, consumer jetstream.Consumer, handler func(parentContext context.Context, message jetstream.Msg)) {
 	for {
 		if context.Err() != nil {
 			return
@@ -216,8 +241,7 @@ func (worker *Worker) consumeLoop(context context.Context, consumer jetstream.Co
 		messageBatch, fetchError := consumer.Fetch(1, jetstream.FetchMaxWait(NatsFetchMaxWaitDuration))
 		if fetchError != nil {
 			if !errors.Is(fetchError, nats.ErrTimeout) {
-				worker.logger.Errorf("[Worker %d] Failed to fetch message batch: %v", workerID, fetchError)
-				// Prevent tight loop on persistent errors (e.g. stream not found)
+				worker.logger.Errorf("Fetch error: %v", fetchError)
 				time.Sleep(1 * time.Second)
 			}
 			continue
@@ -227,7 +251,7 @@ func (worker *Worker) consumeLoop(context context.Context, consumer jetstream.Co
 			if context.Err() != nil {
 				return
 			}
-			worker.processMessage(context, message)
+			handler(context, message)
 		}
 	}
 }
@@ -286,6 +310,66 @@ func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) 
 	return func() {
 		close(done)
 	}
+}
+
+func (worker *Worker) handleMusicCreatedMessage(context context.Context, message jetstream.Msg) {
+	_ = message.InProgress()
+
+	var event events.MusicCreatedEvent
+	if err := json.Unmarshal(message.Data(), &event); err != nil {
+		worker.logger.Errorf("Malformed Music Created event: %v", err)
+		_ = message.Term()
+		return
+	}
+
+	worker.logger.Infof("Received Music Created for Workflow %s", event.Header.WorkflowID)
+
+	if err := worker.executeMusicCreatedWorkflow(context, &event); err != nil {
+		worker.logger.Errorf("Music Created workflow failed: %v", err)
+		_ = message.NakWithDelay(5 * time.Second)
+		return
+	}
+
+	if err := message.Ack(); err != nil {
+		worker.logger.Errorf("Ack failed: %v", err)
+	}
+}
+
+func (worker *Worker) executeMusicCreatedWorkflow(context context.Context, event *events.MusicCreatedEvent) error {
+	// 1. Mark as ready in KV
+	readyKey := fmt.Sprintf(MusicReadyKeyFormat, event.Header.WorkflowID)
+	if _, err := worker.progressKeyValueStore.Put(context, readyKey, []byte("true")); err != nil {
+		return fmt.Errorf("failed to mark music as ready in KV: %w", err)
+	}
+
+	// 2. Retrieve TotalPages
+	totalPagesKey := fmt.Sprintf(TotalPagesKeyFormat, event.Header.WorkflowID)
+	entry, err := worker.progressKeyValueStore.Get(context, totalPagesKey)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			// Speech hasn't started yet? Just wait for speech to finish.
+			return nil
+		}
+		return fmt.Errorf("failed to get total pages from KV: %w", err)
+	}
+
+	var totalPages int
+	if _, err := fmt.Sscanf(string(entry.Value()), "%d", &totalPages); err != nil {
+		return fmt.Errorf("failed to parse total pages: %w", err)
+	}
+
+	// 3. Check Completeness
+	isComplete, err := worker.checkCompleteness(context, event.Header.WorkflowID, totalPages)
+	if err != nil {
+		return err
+	}
+
+	if isComplete {
+		worker.logger.Infof("All speech and music ready for %s (Triggered by Music). Aggregating.", event.Header.WorkflowID)
+		return worker.aggregateAndFinalizeWorkflow(context, event.Header.WorkflowID, totalPages, event.Header, "")
+	}
+
+	return nil
 }
 
 func (worker *Worker) handleProcessingFailure(context context.Context, message jetstream.Msg, payload []byte) {
@@ -417,6 +501,7 @@ func (worker *Worker) updateProgress(context context.Context, workflowID string,
 }
 
 func (worker *Worker) checkCompleteness(context context.Context, workflowID string, totalPages int) (bool, error) {
+	// 1. Check Speech Pages
 	keyFilter := fmt.Sprintf(KeyValueFilterPatternFormat, workflowID)
 	keyLister, err := worker.progressKeyValueStore.ListKeysFiltered(context, keyFilter)
 	if err != nil {
@@ -431,7 +516,33 @@ func (worker *Worker) checkCompleteness(context context.Context, workflowID stri
 		completedCount++
 	}
 
-	return completedCount == totalPages, nil
+	if completedCount < totalPages {
+		return false, nil
+	}
+
+	// 2. Check Music (if requested)
+	requestKey := fmt.Sprintf(MusicRequestedKeyFormat, workflowID)
+	_, err = worker.progressKeyValueStore.Get(context, requestKey)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			// No music requested, we are done with speech.
+			return true, nil
+		}
+		return false, fmt.Errorf("failed to check music request status: %w", err)
+	}
+
+	// Music was requested, check if ready
+	readyKey := fmt.Sprintf(MusicReadyKeyFormat, workflowID)
+	_, err = worker.progressKeyValueStore.Get(context, readyKey)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			// Requested but not ready
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check music ready status: %w", err)
+	}
+
+	return true, nil
 }
 
 func (worker *Worker) aggregateAndFinalizeWorkflow(
@@ -439,7 +550,7 @@ func (worker *Worker) aggregateAndFinalizeWorkflow(
 	workflowID string,
 	totalPages int,
 	header events.EventHeader,
-	musicPrompt string,
+	_ string, // Ignored musicPrompt
 ) error {
 	// 0. Publish Aggregation Started
 	if err := worker.publishAggregationStarted(context, header, totalPages); err != nil {
@@ -479,13 +590,16 @@ func (worker *Worker) aggregateAndFinalizeWorkflow(
 	}
 
 	// 3. Finalize (Remote Mix)
-	// Try to find pre-generated music
 	var finalWavData []byte
-	var musicData []byte
-
-	if musicPrompt != "" {
+	
+	// Check KV for music readiness
+	readyKey := fmt.Sprintf(MusicReadyKeyFormat, workflowID)
+	_, err = worker.progressKeyValueStore.Get(context, readyKey)
+	
+	if err == nil {
+		// Music is ready
 		musicKey := fmt.Sprintf(MusicKeyFormat, workflowID)
-		musicData, err = worker.audioObjectStore.Download(context, musicKey)
+		musicData, err := worker.audioObjectStore.Download(context, musicKey)
 		
 		if err == nil && len(musicData) > 0 {
 			worker.logger.Infof("Found pre-generated music for %s. Mixing...", workflowID)
@@ -497,14 +611,8 @@ func (worker *Worker) aggregateAndFinalizeWorkflow(
 				finalWavData = mixedData
 			}
 		} else {
-			worker.logger.Warnf("Pre-generated music not found for %s (err: %v). Fallback to standard finalization.", workflowID, err)
-			mixedData, err := worker.ttsProcessor.FinalizeAudio(context, combinedWavData, musicPrompt)
-			if err != nil {
-				worker.logger.Errorf("Remote finalization failed: %v. Using speech only.", err)
-				finalWavData = combinedWavData
-			} else {
-				finalWavData = mixedData
-			}
+			worker.logger.Warnf("Music was marked ready but download failed for %s. Proceeding with Speech Only.", workflowID)
+			finalWavData = combinedWavData
 		}
 	} else {
 		finalWavData = combinedWavData
@@ -588,6 +696,12 @@ func (worker *Worker) publishTTSStarted(context context.Context, source *events.
 func (worker *Worker) publishMusicRequest(context context.Context, header events.EventHeader, prompt string, duration int) error {
 	if worker.musicRequestSubject == "" {
 		return nil
+	}
+
+	// 1. Mark as requested in KV for synchronization
+	requestKey := fmt.Sprintf(MusicRequestedKeyFormat, header.WorkflowID)
+	if _, err := worker.progressKeyValueStore.Put(context, requestKey, []byte("true")); err != nil {
+		return fmt.Errorf("failed to mark music as requested in KV: %w", err)
 	}
 
 	event := events.MusicRequestEvent{
