@@ -86,8 +86,11 @@ type ConsumerSettings struct {
 
 // ProducerSettings defines the settings for publishing events.
 type ProducerSettings struct {
-	StreamName  string `toml:"stream"`
-	SubjectName string `toml:"subject"`
+	StreamName                string `toml:"stream"`
+	SubjectName               string `toml:"subject"`
+	TTSStartedSubject         string `toml:"tts_started_subject"`
+	MusicStartedSubject       string `toml:"music_started_subject"`
+	AggregationStartedSubject string `toml:"aggregation_started_subject"`
 }
 
 // ObjectStoreSettings defines the bucket names for storing large payloads.

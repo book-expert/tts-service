@@ -27,6 +27,9 @@ durable = "tts-service-durable"
 [nats.producer]
 stream = "TTS"
 subject = "tts.result"
+tts_started_subject = "tts.started"
+music_started_subject = "audio.music.started"
+aggregation_started_subject = "tts.aggregation.started"
 
 [nats.object_store]
 text_bucket = "TEXT_FILES"
