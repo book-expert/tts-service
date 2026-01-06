@@ -68,15 +68,15 @@ type Application struct {
 	logger           *logger.Logger
 	natsConnection   *nats.Conn
 	jetStreamContext jetstream.JetStream
-	workerInstance   *worker.NatsWorker
+	workerInstance   *worker.Worker
 }
 
 func main() {
 	// Create a context that listens for system interruption signals.
-	signalContext, cancelSignalContext := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancelSignalContext()
+	systemContext, cancelSystemContext := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancelSystemContext()
 
-	if runError := runService(signalContext); runError != nil {
+	if runError := runService(systemContext); runError != nil {
 		fmt.Fprintf(os.Stderr, "Service exited with fatal error: %v\n", runError)
 		os.Exit(1)
 	}
@@ -85,7 +85,7 @@ func main() {
 // runService orchestrates the startup, execution, and shutdown of the application.
 func runService(serviceContext context.Context) error {
 	// 1. Initialize Application
-	serviceApplication, initializationError := newApplication()
+	serviceApplication, initializationError := newApplication(serviceContext)
 	if initializationError != nil {
 		return initializationError
 	}
@@ -101,7 +101,7 @@ func runService(serviceContext context.Context) error {
 // newApplication initializes all service dependencies.
 //
 // Flow: Load Config -> Init Logger -> Connect NATS -> Bind Stores -> Init TTS -> Create Worker
-func newApplication() (*Application, error) {
+func newApplication(rootContext context.Context) (*Application, error) {
 	// 1. Load Configuration
 	serviceConfig, configLoadError := config.Load(ConfigFileName)
 	if configLoadError != nil {
@@ -124,7 +124,7 @@ func newApplication() (*Application, error) {
 	}
 
 	// 4. Bind Object Stores
-	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(context.Background(), jetStreamContext, serviceConfig)
+	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(rootContext, jetStreamContext, serviceConfig)
 	if objectStoreBindError != nil {
 		natsConnection.Close()
 		_ = systemLogger.Close()
@@ -132,7 +132,7 @@ func newApplication() (*Application, error) {
 	}
 
 	// 5. Initialize Key-Value Store
-	progressKeyValueStore, kvStoreInitError := setupProgressStore(context.Background(), jetStreamContext, serviceConfig)
+	progressKeyValueStore, kvStoreInitError := setupProgressStore(rootContext, jetStreamContext, serviceConfig)
 	if kvStoreInitError != nil {
 		natsConnection.Close()
 		_ = systemLogger.Close()
@@ -151,7 +151,7 @@ func newApplication() (*Application, error) {
 		systemLogger.Warnf("Music API Key (%s) not found in env. Music generation will fail.", serviceConfig.TTS.APIKeyEnvironmentVariable)
 	}
 	// Use consolidated audio package
-	musicClient, musicErr := audio.NewMusicClient(context.Background(), musicApiKey, systemLogger)
+	musicClient, musicErr := audio.NewMusicClient(rootContext, musicApiKey, systemLogger)
 	if musicErr != nil {
 		systemLogger.Errorf("Failed to initialize Music Client: %v", musicErr)
 		// We verify at runtime
@@ -172,7 +172,7 @@ func newApplication() (*Application, error) {
 	)
 
 	// 7. Create Worker
-	natsWorker, workerInitError := worker.NewNatsWorker(
+	workerInstance, workerInitError := worker.New(
 		natsConnection,
 		jetStreamContext,
 		jetStreamContext, // Passed twice as ConsumerContext and PublisherContext
@@ -180,6 +180,9 @@ func newApplication() (*Application, error) {
 		serviceConfig.NATS.Consumer.SubjectFilter,
 		serviceConfig.NATS.Consumer.DurableName,
 		serviceConfig.NATS.Producer.SubjectName,
+		serviceConfig.NATS.Producer.TTSStartedSubject,
+		serviceConfig.NATS.Producer.MusicStartedSubject,
+		serviceConfig.NATS.Producer.AggregationStartedSubject,
 		serviceConfig.NATS.DeadLetterQueueSubject,
 		textObjectStore,
 		ttsObjectStore, // CORRECT VARIABLE
@@ -200,9 +203,11 @@ func newApplication() (*Application, error) {
 		logger:           systemLogger,
 		natsConnection:   natsConnection,
 		jetStreamContext: jetStreamContext,
-		workerInstance:   natsWorker,
+		workerInstance:   workerInstance,
 	}, nil
 }
+
+
 
 // cleanup ensures resources are released properly on shutdown.
 func (serviceApplication *Application) cleanup() {
