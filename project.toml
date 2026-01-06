@@ -29,6 +29,8 @@ stream = "TTS"
 subject = "tts.result"
 tts_started_subject = "tts.started"
 music_started_subject = "audio.music.started"
+music_request_subject = "audio.music.request"
+music_created_subject = "audio.music.created"
 aggregation_started_subject = "tts.aggregation.started"
 
 [nats.object_store]

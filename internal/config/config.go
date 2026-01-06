@@ -90,6 +90,8 @@ type ProducerSettings struct {
 	SubjectName               string `toml:"subject"`
 	TTSStartedSubject         string `toml:"tts_started_subject"`
 	MusicStartedSubject       string `toml:"music_started_subject"`
+	MusicRequestSubject       string `toml:"music_request_subject"`
+	MusicCreatedSubject       string `toml:"music_created_subject"`
 	AggregationStartedSubject string `toml:"aggregation_started_subject"`
 }
 
