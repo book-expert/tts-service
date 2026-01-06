@@ -182,6 +182,8 @@ func newApplication(rootContext context.Context) (*Application, error) {
 		serviceConfig.NATS.Producer.SubjectName,
 		serviceConfig.NATS.Producer.TTSStartedSubject,
 		serviceConfig.NATS.Producer.MusicStartedSubject,
+		serviceConfig.NATS.Producer.MusicRequestSubject,
+		serviceConfig.NATS.Producer.MusicCreatedSubject,
 		serviceConfig.NATS.Producer.AggregationStartedSubject,
 		serviceConfig.NATS.DeadLetterQueueSubject,
 		textObjectStore,

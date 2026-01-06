@@ -108,6 +108,8 @@ type Worker struct {
 	producerSubject           string
 	ttsStartedSubject         string
 	musicStartedSubject       string
+	musicRequestSubject       string
+	musicCreatedSubject       string
 	aggregationStartedSubject string
 	deadLetterQueueSubject    string
 	textObjectStore           core.ObjectStore
@@ -131,6 +133,8 @@ func New(
 	producerSubject string,
 	ttsStartedSubject string,
 	musicStartedSubject string,
+	musicRequestSubject string,
+	musicCreatedSubject string,
 	aggregationStartedSubject string,
 	deadLetterQueueSubject string,
 	textObjectStore core.ObjectStore,
@@ -154,6 +158,8 @@ func New(
 		producerSubject:           producerSubject,
 		ttsStartedSubject:         ttsStartedSubject,
 		musicStartedSubject:       musicStartedSubject,
+		musicRequestSubject:       musicRequestSubject,
+		musicCreatedSubject:       musicCreatedSubject,
 		aggregationStartedSubject: aggregationStartedSubject,
 		deadLetterQueueSubject:    deadLetterQueueSubject,
 		textObjectStore:           textObjectStore,
@@ -300,9 +306,18 @@ func (worker *Worker) handleProcessingFailure(context context.Context, message j
 }
 
 func (worker *Worker) executeTTSJob(context context.Context, event *events.TextProcessedEvent) error {
-	// 0. Publish TTS Started
+	// 0a. Publish TTS Started
 	if err := worker.publishTTSStarted(context, event); err != nil {
 		worker.logger.Warnf("Failed to publish TTS started event: %v", err)
+	}
+
+	// 0b. Request Background Music Generation (Page 1 Only)
+	if event.PageNumber == 1 && event.Settings != nil && event.Settings.AudioSessionConfig != nil && event.Settings.AudioSessionConfig.MusicPrompt != "" {
+		worker.logger.Infof("Requesting background music generation for Workflow %s", event.Header.WorkflowID)
+		// We default to 180s (3 mins) for now, as per standard
+		if err := worker.publishMusicRequest(context, event.Header, event.Settings.AudioSessionConfig.MusicPrompt, 180); err != nil {
+			worker.logger.Errorf("Failed to publish music request: %v", err)
+		}
 	}
 
 	// 1. Get Text
@@ -567,6 +582,26 @@ func (worker *Worker) publishTTSStarted(context context.Context, source *events.
 	}
 
 	_, err = worker.jetStreamPublisher.Publish(context, worker.ttsStartedSubject, data)
+	return err
+}
+
+func (worker *Worker) publishMusicRequest(context context.Context, header events.EventHeader, prompt string, duration int) error {
+	if worker.musicRequestSubject == "" {
+		return nil
+	}
+
+	event := events.MusicRequestEvent{
+		Header:          header,
+		Prompt:          prompt,
+		DurationSeconds: duration,
+	}
+
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+
+	_, err = worker.jetStreamPublisher.Publish(context, worker.musicRequestSubject, data)
 	return err
 }
 
