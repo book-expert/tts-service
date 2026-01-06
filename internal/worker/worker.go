@@ -373,6 +373,20 @@ func (worker *Worker) executeMusicCreatedWorkflow(context context.Context, event
 }
 
 func (worker *Worker) handleProcessingFailure(context context.Context, message jetstream.Msg, payload []byte) {
+	// Check delivery count for retry logic
+	metadata, err := message.Metadata()
+	if err == nil {
+		if metadata.NumDelivered < 3 {
+			worker.logger.Warnf("Processing failed (Attempt %d/3). Retrying in 5s...", metadata.NumDelivered)
+			_ = message.NakWithDelay(5 * time.Second)
+			return
+		}
+	} else {
+		worker.logger.Warnf("Failed to get message metadata: %v", err)
+	}
+
+	worker.logger.Errorf("Processing failed after attempts. Moving to DLQ.")
+
 	if worker.deadLetterQueueSubject == "" {
 		_ = message.Nak()
 		return
