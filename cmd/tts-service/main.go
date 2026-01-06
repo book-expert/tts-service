@@ -145,18 +145,6 @@ func newApplication(rootContext context.Context) (*Application, error) {
 	// Rename to SpeechClient to match new interface
 	speechClient := audio.NewSpeechClient(serviceConfig.TTS.AudioServerURL, systemLogger)
 
-	// 6b. Music Client (Lyria)
-	musicApiKey := os.Getenv(serviceConfig.TTS.APIKeyEnvironmentVariable)
-	if musicApiKey == "" {
-		systemLogger.Warnf("Music API Key (%s) not found in env. Music generation will fail.", serviceConfig.TTS.APIKeyEnvironmentVariable)
-	}
-	// Use consolidated audio package
-	musicClient, musicErr := audio.NewMusicClient(rootContext, musicApiKey, systemLogger)
-	if musicErr != nil {
-		systemLogger.Errorf("Failed to initialize Music Client: %v", musicErr)
-		// We verify at runtime
-	}
-
 	// 6c. Mixer (FFmpeg)
 	// Use consolidated audio package
 	audioMixer := audio.NewMixer(systemLogger)
@@ -165,7 +153,6 @@ func newApplication(rootContext context.Context) (*Application, error) {
 	// Use consolidated audio package
 	ttsProcessor := audio.NewProcessor(
 		speechClient,
-		musicClient,
 		audioMixer,
 		systemLogger,
 		serviceConfig.TTS.SpeechConcurrency,
@@ -191,7 +178,7 @@ func newApplication(rootContext context.Context) (*Application, error) {
 		progressKeyValueStore,
 		ttsProcessor, // CORRECT VARIABLE
 		systemLogger,
-		1, // Forced to 1 to process one page at a time
+		serviceConfig.Service.WorkerCount, // Using real count now
         serviceConfig.Service.UserDatabaseURL,
 	)
 	if workerInitError != nil {

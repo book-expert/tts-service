@@ -44,11 +44,9 @@ import (
 // Processor implements core.TTSProcessor.
 // It coordinates:
 // 1. Text -> Speech (via Audio Client/Audio Server)
-// 2. Prompt -> Music (via Music Client/Lyria)
-// 3. Speech + Music -> Mixed Audio (via Mixer/FFmpeg)
+// 2. Speech + Music -> Mixed Audio (via Mixer/FFmpeg)
 type Processor struct {
 	speechClient      *SpeechClient
-	musicClient       *MusicClient
 	audioMixer        *Mixer
 	logger            *logger.Logger
 	speechConcurrency int
@@ -57,7 +55,6 @@ type Processor struct {
 // NewProcessor creates a new TTS Processor with all required dependencies.
 func NewProcessor(
 	speechClient *SpeechClient,
-	musicClient *MusicClient,
 	audioMixer *Mixer,
 	log *logger.Logger,
 	concurrency int,
@@ -67,7 +64,6 @@ func NewProcessor(
 	}
 	return &Processor{
 		speechClient:      speechClient,
-		musicClient:       musicClient,
 		audioMixer:        audioMixer,
 		logger:            log,
 		speechConcurrency: concurrency,
@@ -176,12 +172,6 @@ func (p *Processor) Process(ctx context.Context, text []byte, config core.TTSCon
 
 	p.logger.Infof("Processor: Successfully generated padded page audio (%d bytes)", len(finalBytes))
 	return finalBytes, nil
-}
-
-// GenerateMusic calls the Music Client (Lyria RealTime via Wrapper) to generate a background track.
-func (p *Processor) GenerateMusic(ctx context.Context, prompt string, duration int) ([]byte, error) {
-	p.logger.Infof("Processor: Generating music with prompt: '%s', Duration: %ds", prompt, duration)
-	return p.musicClient.GenerateMusic(ctx, prompt, duration)
 }
 
 // MixAudio combines speech and music using the local Mixer (FFmpeg).
