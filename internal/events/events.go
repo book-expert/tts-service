@@ -94,3 +94,16 @@ type AggregationStartedEvent struct {
 	Header     EventHeader `json:"Header"`
 	TotalPages int         `json:"TotalPages"`
 }
+
+// MusicRequestEvent is triggered by the tts-service to request a soundscape.
+type MusicRequestEvent struct {
+	Header          EventHeader `json:"Header"`
+	Prompt          string      `json:"Prompt"`
+	DurationSeconds int         `json:"DurationSeconds"`
+}
+
+// MusicCreatedEvent is triggered when the soundscape has been generated and stored.
+type MusicCreatedEvent struct {
+	Header   EventHeader `json:"Header"`
+	MusicKey string      `json:"MusicKey"`
+}
