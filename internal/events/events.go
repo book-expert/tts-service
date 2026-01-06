@@ -76,3 +76,21 @@ type AudioChunkCreatedEvent struct {
 	PageNumber int         `json:"PageNumber"`
 	TotalPages int         `json:"TotalPages"`
 }
+
+// TTSStartedEvent is triggered when the text-to-speech process begins for a page.
+type TTSStartedEvent struct {
+	Header     EventHeader `json:"Header"`
+	PageNumber int         `json:"PageNumber"`
+	TotalPages int         `json:"TotalPages"`
+}
+
+// MusicStartedEvent is triggered when background music generation begins.
+type MusicStartedEvent struct {
+	Header     EventHeader `json:"Header"`
+}
+
+// AggregationStartedEvent is triggered when the aggregation and finalization of audio chunks begins.
+type AggregationStartedEvent struct {
+	Header     EventHeader `json:"Header"`
+	TotalPages int         `json:"TotalPages"`
+}
