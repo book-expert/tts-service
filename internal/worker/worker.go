@@ -376,9 +376,9 @@ func (worker *Worker) handleProcessingFailure(context context.Context, message j
 	// Check delivery count for retry logic
 	metadata, err := message.Metadata()
 	if err == nil {
-		if metadata.NumDelivered < 3 {
-			worker.logger.Warnf("Processing failed (Attempt %d/3). Retrying in 5s...", metadata.NumDelivered)
-			_ = message.NakWithDelay(5 * time.Second)
+		if metadata.NumDelivered < 10 {
+			worker.logger.Warnf("Processing failed (Attempt %d/10). Retrying in 20s...", metadata.NumDelivered)
+			_ = message.NakWithDelay(20 * time.Second)
 			return
 		}
 	} else {
