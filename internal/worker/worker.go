@@ -53,7 +53,7 @@ import (
 
 const (
 	// MessageProcessingTimeout defines the maximum duration allowed for processing a single TTS job.
-	MessageProcessingTimeout = 1000 * time.Second
+	MessageProcessingTimeout = 3600 * time.Second
 
 	// NatsFetchMaxWaitDuration defines how long the worker waits for a batch of messages from NATS.
 	NatsFetchMaxWaitDuration = 10 * time.Second
