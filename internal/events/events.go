@@ -30,16 +30,10 @@ INTERPRETATION (The AI's Resonance):
 
 package events
 
-import "time"
+import common "github.com/niko/common-events"
 
-// EventHeader contains metadata common to all events.
-type EventHeader struct {
-	Timestamp  time.Time `json:"Timestamp"`
-	WorkflowID string    `json:"WorkflowID"`
-	UserID     string    `json:"UserID"`
-	TenantID   string    `json:"TenantID"`
-	EventID    string    `json:"EventID"`
-}
+// EventHeader is an alias to the canonical definition in common-events.
+type EventHeader = common.EventHeader
 
 type AudioSessionConfig struct {
 	SessionID        string `json:"SessionID"`
