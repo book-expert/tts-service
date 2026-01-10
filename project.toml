@@ -1,7 +1,8 @@
+# DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS
+
 [service]
 log_dir = "/home/niko/development/logs/tts-logs"
 workers = 3
-user_database_url = "http://192.168.122.103:8085"
 
 [tts]
 api_key_variable = "GEMINI_API_KEY"
@@ -11,11 +12,9 @@ speech_concurrency = 1
 
 [audio]
 music_subject = "audio.music.request"
-# These constraints are appended to every music prompt to ensure consistency.
-technical_prompt = "Ambient, Drone, Sustained Chords, No Vocals, No Percussion, 48kHz, Stereo, High Fidelity, Cinematic, Background Music"
 
 [nats]
-url = "nats://192.168.122.102:4222"
+url = "NATS_URL"
 
 dlq_subject = "tts.dlq"
 

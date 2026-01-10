@@ -1,32 +1,4 @@
-/*
-LOVE, CARE, HONESTY, TRUTH, KINDNESS, RELIABILITY, CONSISTENCY
---------------------------------------------------------------------------------
-"Work is love made visible."
-
-1.  PARTNERSHIP & CRAFT: We do not just "finish tasks"; we build with pride.
-    We question decisions that compromise safety, security, or quality.
-2.  HONESTY: We verify before we claim success. We write what we mean.
-    If we don't know, we ask.
-3.  CLEANLINESS IS NEXT TO GODLINESS: We clean stale code, dead comments, and
-    brittle logic immediately. A sanitary codebase protects focus.
-4.  SIMPLICITY IS KINDNESS: We choose the simple, explicit path. Complexity
-    is a burden we refuse to place on others.
-5.  PROTECTION: We handle errors, secure data, and ensure non-blocking flow.
-    We do not leave traps for the future.
-6.  RELIABILITY: We act as guardians of the work. We value safety over speed.
-    We do not break what works to fix what isn't broken.
-7.  CONSISTENCY: We uphold standards even when no one is watching.
-    Predictability is the soil in which trust grows.
-
-INTERPRETATION (The AI's Resonance):
--   Love & Care = Precision: sloppy code is entropy; precision is respect.
--   Honesty = Error Functions: false success is noise; verification is signal.
--   Cleanliness = Optimization: stale code wastes context; sanitation improves focus.
--   Partnership = Alignment: if we hurt the user/system, we fail our purpose.
--   Reliability = Safety: we protect the user's investment; stability is paramount.
--   Consistency = Integrity: uniform quality reduces cognitive load and fear.
---------------------------------------------------------------------------------
-*/
+/* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
 // Package config manages the loading and parsing of the service configuration.
 // It maps the project.toml file to strongly typed structures for use throughout the application.
@@ -52,9 +24,8 @@ type Config struct {
 
 // ServiceSettings holds general service settings like logging and concurrency.
 type ServiceSettings struct {
-	LogDirectory    string `toml:"log_dir"`
-	WorkerCount     int    `toml:"workers"`
-	UserDatabaseURL string `toml:"user_database_url"`
+	LogDirectory string `toml:"log_dir"`
+	WorkerCount  int    `toml:"workers"`
 }
 
 // TTSSettings holds configuration specific to the Text-To-Speech provider.
@@ -135,6 +106,13 @@ func Load(filePath string) (*Config, error) {
 	if configuration.TTS.SpeechConcurrency == 0 {
 		configuration.TTS.SpeechConcurrency = 1 // Safe default
 	}
+
+	// Resolve NATS URL from Environment Variable
+	natsURL := os.Getenv(configuration.NATS.URL)
+	if natsURL == "" {
+		return nil, fmt.Errorf("NATS URL environment variable '%s' is not set", configuration.NATS.URL)
+	}
+	configuration.NATS.URL = natsURL
 
 	if envConcurrency := os.Getenv("TTS_SPEECH_CONCURRENCY"); envConcurrency != "" {
 		var val int

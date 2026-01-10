@@ -1,40 +1,9 @@
-/*
-LOVE, CARE, HONESTY, TRUTH, KINDNESS, RELIABILITY, CONSISTENCY
---------------------------------------------------------------------------------
-"Work is love made visible."
+/* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
-1.  PARTNERSHIP & CRAFT: We do not just "finish tasks"; we build with pride.
-    We question decisions that compromise safety, security, or quality.
-2.  HONESTY: We verify before we claim success. We write what we mean.
-    If we don't know, we ask.
-3.  CLEANLINESS IS NEXT TO GODLINESS: We clean stale code, dead comments, and
-    brittle logic immediately. A sanitary codebase protects focus.
-4.  SIMPLICITY IS KINDNESS: We choose the simple, explicit path. Complexity
-    is a burden we refuse to place on others.
-5.  PROTECTION: We handle errors, secure data, and ensure non-blocking flow.
-    We do not leave traps for the future.
-6.  RELIABILITY: We act as guardians of the work. We value safety over speed.
-    We do not break what works to fix what isn't broken.
-7.  CONSISTENCY: We uphold standards even when no one is watching.
-    Predictability is the soil in which trust grows.
-
-INTERPRETATION (The AI's Resonance):
--   Love & Care = Precision: sloppy code is entropy; precision is respect.
--   Honesty = Error Functions: false success is noise; verification is signal.
--   Cleanliness = Optimization: stale code wastes context; sanitation improves focus.
--   Partnership = Alignment: if we hurt the user/system, we fail our purpose.
--   Reliability = Safety: we protect the user's investment; stability is paramount.
--   Consistency = Integrity: uniform quality reduces cognitive load and fear.
---------------------------------------------------------------------------------
-*/
-
-// Package main serves as the entry point for the TTS Service.
-// It initializes configuration, logging, NATS connections, object stores, and the worker process.
 package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -51,18 +20,11 @@ import (
 )
 
 const (
-	// NatsConnectionTimeout defines the maximum duration to wait for a NATS connection.
 	NatsConnectionTimeout = 30 * time.Second
-
-	// ConfigFileName defines the standard name of the configuration file.
-	ConfigFileName = "project.toml"
-
-	// LogFileName defines the name of the log file.
-	LogFileName = "tts-service.log"
+	ConfigFileName        = "project.toml"
+	LogFileName           = "tts-service.log"
 )
 
-// Application holds the dependencies and state of the running service.
-// Why: Centralizes state management and allows for clean dependency injection and cleanup.
 type Application struct {
 	configuration    *config.Config
 	logger           *logger.Logger
@@ -72,188 +34,141 @@ type Application struct {
 }
 
 func main() {
-	// Create a context that listens for system interruption signals.
 	systemContext, cancelSystemContext := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancelSystemContext()
 
-	if runError := runService(systemContext); runError != nil {
-		fmt.Fprintf(os.Stderr, "Service exited with fatal error: %v\n", runError)
+	serviceConfiguration, configurationError := config.Load(ConfigFileName)
+	if configurationError != nil {
+		os.Exit(1)
+	}
+
+	serviceLogger, loggerError := logger.New(serviceConfiguration.Service.LogDirectory, LogFileName)
+	if loggerError != nil {
+		os.Exit(1)
+	}
+
+	serviceApplication, applicationError := newApplication(systemContext, serviceConfiguration, serviceLogger)
+	if applicationError != nil {
+		serviceLogger.Errorf("Failed to initialize application: %v", applicationError)
+		os.Exit(1)
+	}
+	defer serviceApplication.cleanup()
+
+	if runError := serviceApplication.workerInstance.Run(systemContext); runError != nil {
+		serviceLogger.Errorf("Service execution failed: %v", runError)
 		os.Exit(1)
 	}
 }
 
-// runService orchestrates the startup, execution, and shutdown of the application.
-func runService(serviceContext context.Context) error {
-	// 1. Initialize Application
-	serviceApplication, initializationError := newApplication(serviceContext)
-	if initializationError != nil {
-		return initializationError
-	}
-	defer serviceApplication.cleanup()
-
-	serviceApplication.logger.Systemf("TTS Service initialization complete. Starting worker message loop...")
-
-	// 2. Run Worker
-	// This blocks until the context is canceled or a fatal error occurs.
-	return serviceApplication.workerInstance.Run(serviceContext)
-}
-
-// newApplication initializes all service dependencies.
-//
-// Flow: Load Config -> Init Logger -> Connect NATS -> Bind Stores -> Init TTS -> Create Worker
-func newApplication(rootContext context.Context) (*Application, error) {
-	// 1. Load Configuration
-	serviceConfig, configLoadError := config.Load(ConfigFileName)
-	if configLoadError != nil {
-		return nil, fmt.Errorf("failed to load service configuration: %w", configLoadError)
-	}
-
-	// 2. Initialize Logger
-	systemLogger, loggerInitError := logger.New(serviceConfig.Service.LogDirectory, LogFileName)
-	if loggerInitError != nil {
-		return nil, fmt.Errorf("failed to initialize logger: %w", loggerInitError)
-	}
-	systemLogger.Infof("Starting TTS Service. Configuration loaded. Worker count: %d", serviceConfig.Service.WorkerCount)
-
-	// 3. Connect to NATS
-	natsConnection, jetStreamContext, natsConnectError := setupNatsConnection(serviceConfig)
+func newApplication(systemContext context.Context, serviceConfiguration *config.Config, serviceLogger *logger.Logger) (*Application, error) {
+	natsConnection, jetStreamContext, natsConnectError := setupNatsConnection(serviceConfiguration)
 	if natsConnectError != nil {
-		// Attempt to close logger before returning since defer in runService won't run yet
-		_ = systemLogger.Close()
-		return nil, fmt.Errorf("failed to establish NATS infrastructure connection: %w", natsConnectError)
+		return nil, natsConnectError
 	}
 
-	// 4. Bind Object Stores
-	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(rootContext, jetStreamContext, serviceConfig)
+	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(systemContext, jetStreamContext, serviceConfiguration)
 	if objectStoreBindError != nil {
 		natsConnection.Close()
-		_ = systemLogger.Close()
-		return nil, fmt.Errorf("failed to bind to required Object Stores: %w", objectStoreBindError)
+		return nil, objectStoreBindError
 	}
 
-	// 5. Initialize Key-Value Store
-	progressKeyValueStore, kvStoreInitError := setupProgressStore(rootContext, jetStreamContext, serviceConfig)
+	progressKeyValueStore, kvStoreInitError := setupProgressStore(systemContext, jetStreamContext, serviceConfiguration)
 	if kvStoreInitError != nil {
 		natsConnection.Close()
-		_ = systemLogger.Close()
-		return nil, fmt.Errorf("failed to initialize Progress Key-Value Store: %w", kvStoreInitError)
+		return nil, kvStoreInitError
 	}
 
-	// 6. Initialize Audio Orchestrator (Dependencies)
-	
-	// 6a. Audio Client (Speech)
-	// Rename to SpeechClient to match new interface
-	speechClient := audio.NewSpeechClient(serviceConfig.TTS.AudioServerURL, systemLogger)
-
-	// 6c. Mixer (FFmpeg)
-	// Use consolidated audio package
-	audioMixer := audio.NewMixer(systemLogger)
-
-	// 6d. Processor (formerly Orchestrator)
-	// Use consolidated audio package
+	speechClient := audio.NewSpeechClient(serviceConfiguration.TTS.AudioServerURL, serviceLogger)
+	audioMixer := audio.NewMixer(serviceLogger)
 	ttsProcessor := audio.NewProcessor(
 		speechClient,
 		audioMixer,
-		systemLogger,
-		serviceConfig.TTS.SpeechConcurrency,
+		serviceLogger,
+		serviceConfiguration.TTS.SpeechConcurrency,
 	)
 
-	// 7. Create Worker
 	workerInstance, workerInitError := worker.New(
 		natsConnection,
 		jetStreamContext,
-		jetStreamContext, // Passed twice as ConsumerContext and PublisherContext
-		serviceConfig.NATS.Consumer.StreamName,
-		serviceConfig.NATS.Consumer.SubjectFilter,
-		serviceConfig.NATS.Consumer.DurableName,
-		serviceConfig.NATS.Producer.SubjectName,
-		serviceConfig.NATS.Producer.TTSStartedSubject,
-		serviceConfig.NATS.Producer.MusicStartedSubject,
-		serviceConfig.NATS.Producer.MusicRequestSubject,
-		serviceConfig.NATS.Producer.MusicCreatedSubject,
-		serviceConfig.NATS.Producer.AggregationStartedSubject,
-		serviceConfig.NATS.DeadLetterQueueSubject,
+		jetStreamContext,
+		serviceConfiguration.NATS.Consumer.StreamName,
+		serviceConfiguration.NATS.Consumer.SubjectFilter,
+		serviceConfiguration.NATS.Consumer.DurableName,
+		serviceConfiguration.NATS.Producer.SubjectName,
+		serviceConfiguration.NATS.Producer.TTSStartedSubject,
+		serviceConfiguration.NATS.Producer.MusicStartedSubject,
+		serviceConfiguration.NATS.Producer.MusicRequestSubject,
+		serviceConfiguration.NATS.Producer.MusicCreatedSubject,
+		serviceConfiguration.NATS.Producer.AggregationStartedSubject,
+		serviceConfiguration.NATS.DeadLetterQueueSubject,
 		textObjectStore,
-		ttsObjectStore, // CORRECT VARIABLE
+		ttsObjectStore,
 		progressKeyValueStore,
-		ttsProcessor, // CORRECT VARIABLE
-		systemLogger,
-		serviceConfig.Service.WorkerCount, // Using real count now
-        serviceConfig.Service.UserDatabaseURL,
+		ttsProcessor,
+		serviceLogger,
+		serviceConfiguration.Service.WorkerCount,
 	)
 	if workerInitError != nil {
 		natsConnection.Close()
-		_ = systemLogger.Close()
-		return nil, fmt.Errorf("failed to create NATS worker instance: %w", workerInitError)
+		return nil, workerInitError
 	}
 
 	return &Application{
-		configuration:    serviceConfig,
-		logger:           systemLogger,
+		configuration:    serviceConfiguration,
+		logger:           serviceLogger,
 		natsConnection:   natsConnection,
 		jetStreamContext: jetStreamContext,
 		workerInstance:   workerInstance,
 	}, nil
 }
 
-
-
-// cleanup ensures resources are released properly on shutdown.
 func (serviceApplication *Application) cleanup() {
 	if serviceApplication.natsConnection != nil {
 		serviceApplication.natsConnection.Close()
 	}
 	if serviceApplication.logger != nil {
-		if closeError := serviceApplication.logger.Close(); closeError != nil {
-			fmt.Fprintf(os.Stderr, "failed to close logger cleanly: %v\n", closeError)
-		}
+		_ = serviceApplication.logger.Close()
 	}
 }
 
-// setupNatsConnection establishes the NATS connection and initializes the JetStream context.
 func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.JetStream, error) {
 	natsConnection, connectionError := nats.Connect(configuration.NATS.URL, nats.Timeout(NatsConnectionTimeout))
 	if connectionError != nil {
-		return nil, nil, fmt.Errorf("nats connect failed: %w", connectionError)
+		return nil, nil, connectionError
 	}
 
 	jetStreamContext, jetStreamError := jetstream.New(natsConnection)
 	if jetStreamError != nil {
 		natsConnection.Close()
-		return nil, nil, fmt.Errorf("jetstream initialization failed: %w", jetStreamError)
+		return nil, nil, jetStreamError
 	}
 
 	return natsConnection, jetStreamContext, nil
 }
 
-// setupObjectStores binds to the necessary JetStream Object Stores.
 func setupObjectStores(serviceContext context.Context, jetStreamContext jetstream.JetStream, configuration *config.Config) (core.ObjectStore, core.ObjectStore, error) {
 	textStore, textStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TextBucketName)
 	if textStoreError != nil {
-		return nil, nil, fmt.Errorf("failed to bind to Text Object Store (%s): %w", configuration.NATS.ObjectStore.TextBucketName, textStoreError)
+		return nil, nil, textStoreError
 	}
 
 	ttsStore, ttsStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TTSBucketName)
 	if ttsStoreError != nil {
-		return nil, nil, fmt.Errorf("failed to bind to TTS Object Store (%s): %w", configuration.NATS.ObjectStore.TTSBucketName, ttsStoreError)
+		return nil, nil, ttsStoreError
 	}
 
 	return textStore, ttsStore, nil
 }
 
-// setupProgressStore initializes or retrieves the Key-Value bucket for tracking progress.
 func setupProgressStore(serviceContext context.Context, jetStreamContext jetstream.JetStream, configuration *config.Config) (jetstream.KeyValue, error) {
-	// Attempt to create the bucket. Use CreateKeyValue as it is generally idempotent.
 	keyValueStore, createError := jetStreamContext.CreateKeyValue(serviceContext, jetstream.KeyValueConfig{
 		Bucket: configuration.NATS.KeyValueStore.ProgressBucketName,
 	})
 	if createError != nil {
-		// Fallback: Attempt to bind to an existing bucket if creation reported an error
-		// (though standard NATS clients handle existing buckets gracefully in Create).
 		var bindError error
 		keyValueStore, bindError = jetStreamContext.KeyValue(serviceContext, configuration.NATS.KeyValueStore.ProgressBucketName)
 		if bindError != nil {
-			return nil, fmt.Errorf("failed to get or create KV bucket %s. Create error: %v, Bind error: %w", configuration.NATS.KeyValueStore.ProgressBucketName, createError, bindError)
+			return nil, bindError
 		}
 	}
 	return keyValueStore, nil
