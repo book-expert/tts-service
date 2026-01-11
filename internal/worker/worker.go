@@ -49,7 +49,6 @@ type JetStreamPublisher interface {
 // Worker manages the lifecycle of processing text-to-speech requests from NATS.
 type Worker struct {
 	baseWorker                *worker.Worker[*events.TextProcessedEvent]
-	natsConnection            *nats.Conn
 	jetStreamPublisher        JetStreamPublisher
 	jetStreamContext          jetstream.JetStream
 	producerSubject           string
@@ -89,7 +88,6 @@ func New(
 	workerCount int,
 ) (*Worker, error) {
 	textToSpeechWorker := &Worker{
-		natsConnection:             natsConnection,
 		jetStreamPublisher:         jetStreamPublisher,
 		jetStreamContext:           jetStreamContext,
 		producerSubject:            producerSubject,
@@ -114,7 +112,7 @@ func New(
 		MaxDeliver:    10,
 	}
 
-	textToSpeechWorker.baseWorker = worker.New(jetStreamContext, serviceLogger, configuration, textToSpeechWorker.handleMessage)
+	textToSpeechWorker.baseWorker = worker.New(natsConnection, jetStreamContext, serviceLogger, configuration, textToSpeechWorker.handleMessage)
 	return textToSpeechWorker, nil
 }
 

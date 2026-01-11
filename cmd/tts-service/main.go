@@ -4,13 +4,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/config"
@@ -145,40 +143,6 @@ func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.Je
 		return nil, nil, jetStreamError
 	}
 
-	// Ensure the Consumer stream exists
-	_, consumerLookupError := jetStreamContext.Stream(context.Background(), configuration.NATS.Consumer.StreamName)
-	if consumerLookupError != nil {
-		_, consumerCreationError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
-			Name:     configuration.NATS.Consumer.StreamName,
-			Subjects: events.GetStreamSubjects(configuration.NATS.Consumer.StreamName),
-			Storage:  jetstream.FileStorage,
-		})
-		if consumerCreationError != nil {
-			_, retryError := jetStreamContext.Stream(context.Background(), configuration.NATS.Consumer.StreamName)
-			if retryError != nil {
-				natsConnection.Close()
-				return nil, nil, fmt.Errorf("failed to ensure consumer stream %s exists: %w", configuration.NATS.Consumer.StreamName, consumerCreationError)
-			}
-		}
-	}
-
-	// Ensure the Producer stream exists
-	_, producerLookupError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.StreamName)
-	if producerLookupError != nil {
-		_, producerCreationError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
-			Name:     configuration.NATS.Producer.StreamName,
-			Subjects: events.GetStreamSubjects(configuration.NATS.Producer.StreamName),
-			Storage:  jetstream.FileStorage,
-		})
-		if producerCreationError != nil {
-			_, retryError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.StreamName)
-			if retryError != nil {
-				natsConnection.Close()
-				return nil, nil, fmt.Errorf("failed to ensure producer stream %s exists: %w", configuration.NATS.Producer.StreamName, producerCreationError)
-			}
-		}
-	}
-
 	return natsConnection, jetStreamContext, nil
 }
 
@@ -188,24 +152,14 @@ func setupObjectStores(serviceContext context.Context, jetStreamContext jetstrea
 		return nil, nil, textStoreError
 	}
 
-	ttsStore, ttsStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TTSBucketName)
-	if ttsStoreError != nil {
-		return nil, nil, ttsStoreError
+	ttsStore, ttsObjectStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TTSBucketName)
+	if ttsObjectStoreError != nil {
+		return nil, nil, ttsObjectStoreError
 	}
 
 	return textStore, ttsStore, nil
 }
 
 func setupProgressStore(serviceContext context.Context, jetStreamContext jetstream.JetStream, configuration *config.Config) (jetstream.KeyValue, error) {
-	keyValueStore, createError := jetStreamContext.CreateKeyValue(serviceContext, jetstream.KeyValueConfig{
-		Bucket: configuration.NATS.KeyValueStore.ProgressBucketName,
-	})
-	if createError != nil {
-		var bindError error
-		keyValueStore, bindError = jetStreamContext.KeyValue(serviceContext, configuration.NATS.KeyValueStore.ProgressBucketName)
-		if bindError != nil {
-			return nil, bindError
-		}
-	}
-	return keyValueStore, nil
+	return jetStreamContext.KeyValue(serviceContext, configuration.NATS.KeyValueStore.ProgressBucketName)
 }
