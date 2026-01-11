@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/config"
@@ -150,7 +150,7 @@ func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.Je
 	if consumerLookupError != nil {
 		_, consumerCreationError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
 			Name:     configuration.NATS.Consumer.StreamName,
-			Subjects: []string{strings.ToLower(configuration.NATS.Consumer.StreamName) + ".*"},
+			Subjects: events.GetStreamSubjects(configuration.NATS.Consumer.StreamName),
 			Storage:  jetstream.FileStorage,
 		})
 		if consumerCreationError != nil {
@@ -167,7 +167,7 @@ func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.Je
 	if producerLookupError != nil {
 		_, producerCreationError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
 			Name:     configuration.NATS.Producer.StreamName,
-			Subjects: []string{strings.ToLower(configuration.NATS.Producer.StreamName) + ".*"},
+			Subjects: events.GetStreamSubjects(configuration.NATS.Producer.StreamName),
 			Storage:  jetstream.FileStorage,
 		})
 		if producerCreationError != nil {
