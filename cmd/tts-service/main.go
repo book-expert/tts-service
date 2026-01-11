@@ -145,35 +145,35 @@ func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.Je
 	}
 
 	// Ensure the Consumer stream exists
-	_, streamErr := jetStreamContext.Stream(context.Background(), configuration.NATS.Consumer.StreamName)
-	if streamErr != nil {
-		_, createErr := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
+	_, streamLookupError := jetStreamContext.Stream(context.Background(), configuration.NATS.Consumer.StreamName)
+	if streamLookupError != nil {
+		_, streamCreationError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
 			Name:     configuration.NATS.Consumer.StreamName,
 			Subjects: []string{configuration.NATS.Consumer.StreamName + ".*"},
 			Storage:  jetstream.FileStorage,
 		})
-		if createErr != nil {
-			_, retryErr := jetStreamContext.Stream(context.Background(), configuration.NATS.Consumer.StreamName)
-			if retryErr != nil {
+		if streamCreationError != nil {
+			_, retryError := jetStreamContext.Stream(context.Background(), configuration.NATS.Consumer.StreamName)
+			if retryError != nil {
 				natsConnection.Close()
-				return nil, nil, fmt.Errorf("failed to ensure consumer stream %s exists: %w", configuration.NATS.Consumer.StreamName, createErr)
+				return nil, nil, fmt.Errorf("failed to ensure consumer stream %s exists: %w", configuration.NATS.Consumer.StreamName, streamCreationError)
 			}
 		}
 	}
 
 	// Ensure the Producer stream exists
-	_, streamErr = jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.StreamName)
-	if streamErr != nil {
-		_, createErr := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
+	_, streamLookupError = jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.StreamName)
+	if streamLookupError != nil {
+		_, streamCreationError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
 			Name:     configuration.NATS.Producer.StreamName,
 			Subjects: []string{configuration.NATS.Producer.StreamName + ".*"},
 			Storage:  jetstream.FileStorage,
 		})
-		if createErr != nil {
-			_, retryErr := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.StreamName)
-			if retryErr != nil {
+		if streamCreationError != nil {
+			_, retryError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.StreamName)
+			if retryError != nil {
 				natsConnection.Close()
-				return nil, nil, fmt.Errorf("failed to ensure producer stream %s exists: %w", configuration.NATS.Producer.StreamName, createErr)
+				return nil, nil, fmt.Errorf("failed to ensure producer stream %s exists: %w", configuration.NATS.Producer.StreamName, streamCreationError)
 			}
 		}
 	}

@@ -107,17 +107,22 @@ func Load(filePath string) (*Config, error) {
 		configuration.TTS.SpeechConcurrency = 1 // Safe default
 	}
 
-	// Resolve NATS URL from Environment Variable
-	natsURL := os.Getenv(configuration.NATS.URL)
-	if natsURL == "" {
-		return nil, fmt.Errorf("NATS URL environment variable '%s' is not set", configuration.NATS.URL)
+	// Resolve NATS URL
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		configuration.NATS.URL = natsURL
+	} else {
+		// Fallback to legacy behavior: resolve via environment variable named in TOML
+		natsURL = os.Getenv(configuration.NATS.URL)
+		if natsURL == "" {
+			return nil, fmt.Errorf("NATS URL environment variable '%s' is not set", configuration.NATS.URL)
+		}
+		configuration.NATS.URL = natsURL
 	}
-	configuration.NATS.URL = natsURL
 
-	if envConcurrency := os.Getenv("TTS_SPEECH_CONCURRENCY"); envConcurrency != "" {
-		var val int
-		if _, err := fmt.Sscanf(envConcurrency, "%d", &val); err == nil && val > 0 {
-			configuration.TTS.SpeechConcurrency = val
+	if environmentConcurrency := os.Getenv("TTS_SPEECH_CONCURRENCY"); environmentConcurrency != "" {
+		var concurrencyValue int
+		if _, scanError := fmt.Sscanf(environmentConcurrency, "%d", &concurrencyValue); scanError == nil && concurrencyValue > 0 {
+			configuration.TTS.SpeechConcurrency = concurrencyValue
 		}
 	}
 

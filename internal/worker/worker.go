@@ -61,14 +61,14 @@ const (
 
 // JetStreamPublisher defines the interface for publishing messages to JetStream.
 type JetStreamPublisher interface {
-	Publish(context context.Context, subject string, data []byte, options ...jetstream.PublishOpt) (*jetstream.PubAck, error)
+	Publish(requestContext context.Context, subject string, data []byte, options ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 }
 
 // Worker manages the lifecycle of processing TTS requests from NATS.
 type Worker struct {
 	natsConnection            *nats.Conn
 	jetStreamPublisher        JetStreamPublisher
-	jetStream                 jetstream.JetStream
+	jetStreamContext          jetstream.JetStream
 	subscriptionStream        string
 	subscriptionSubject       string
 	consumerDurableName       string
@@ -91,7 +91,7 @@ type Worker struct {
 // New initializes a new Worker with all necessary dependencies.
 func New(
 	natsConnection *nats.Conn,
-	jetStream jetstream.JetStream,
+	jetStreamContext jetstream.JetStream,
 	jetStreamPublisher JetStreamPublisher,
 	subscriptionStream string,
 	subscriptionSubject string,
@@ -116,7 +116,7 @@ func New(
 	return &Worker{
 		natsConnection:            natsConnection,
 		jetStreamPublisher:        jetStreamPublisher,
-		jetStream:                 jetStream,
+		jetStreamContext:          jetStreamContext,
 		subscriptionStream:        subscriptionStream,
 		subscriptionSubject:       subscriptionSubject,
 		consumerDurableName:       consumerDurableName,
@@ -137,11 +137,11 @@ func New(
 }
 
 // Run executes the main worker loop.
-func (worker *Worker) Run(context context.Context) error {
+func (worker *Worker) Run(systemContext context.Context) error {
 	// 1. Subscribe to Text Processing Stream (N Workers)
 	for index := 0; index < worker.workerCount; index++ {
-		if error := worker.bindAndConsume(context, worker.subscriptionStream, worker.subscriptionSubject, worker.consumerDurableName, worker.processMessage); error != nil {
-			return error
+		if executionError := worker.bindAndConsume(systemContext, worker.subscriptionStream, worker.subscriptionSubject, worker.consumerDurableName, worker.processMessage); executionError != nil {
+			return executionError
 		}
 	}
 
@@ -151,36 +151,36 @@ func (worker *Worker) Run(context context.Context) error {
 }
 
 func (worker *Worker) bindAndConsume(
-	context context.Context,
+	systemContext context.Context,
 	streamName, subject, durableName string,
-	handler func(parentContext context.Context, message jetstream.Msg),
+	handler func(requestContext context.Context, message jetstream.Msg),
 ) error {
-	stream, error := worker.jetStream.Stream(context, streamName)
-	if error != nil {
-		return fmt.Errorf("failed to bind stream %s: %w", streamName, error)
+	stream, streamError := worker.jetStreamContext.Stream(systemContext, streamName)
+	if streamError != nil {
+		return fmt.Errorf("failed to bind stream %s: %w", streamName, streamError)
 	}
 
-	consumer, error := stream.CreateOrUpdateConsumer(context, jetstream.ConsumerConfig{
+	consumer, consumerError := stream.CreateOrUpdateConsumer(systemContext, jetstream.ConsumerConfig{
 		Durable:       durableName,
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
-	if error != nil {
-		return fmt.Errorf("failed to create consumer %s: %w", durableName, error)
+	if consumerError != nil {
+		return fmt.Errorf("failed to create consumer %s: %w", durableName, consumerError)
 	}
 
 	worker.waitGroup.Add(1)
 	go func() {
 		defer worker.waitGroup.Done()
-		worker.consumeLoop(context, consumer, handler)
+		worker.consumeLoop(systemContext, consumer, handler)
 	}()
 
 	return nil
 }
 
-func (worker *Worker) consumeLoop(context context.Context, consumer jetstream.Consumer, handler func(parentContext context.Context, message jetstream.Msg)) {
+func (worker *Worker) consumeLoop(systemContext context.Context, consumer jetstream.Consumer, handler func(requestContext context.Context, message jetstream.Msg)) {
 	for {
-		if context.Err() != nil {
+		if systemContext.Err() != nil {
 			return
 		}
 
@@ -194,16 +194,16 @@ func (worker *Worker) consumeLoop(context context.Context, consumer jetstream.Co
 		}
 
 		for message := range messageBatch.Messages() {
-			if context.Err() != nil {
+			if systemContext.Err() != nil {
 				return
 			}
-			handler(context, message)
+			handler(systemContext, message)
 		}
 	}
 }
 
-func (worker *Worker) processMessage(parentContext context.Context, message jetstream.Msg) {
-	processingContext, cancelProcessing := context.WithTimeout(parentContext, MessageProcessingTimeout)
+func (worker *Worker) processMessage(requestContext context.Context, message jetstream.Msg) {
+	processingContext, cancelProcessing := context.WithTimeout(requestContext, MessageProcessingTimeout)
 	defer cancelProcessing()
 
 	event, parseError := worker.parseAndValidateEvent(message)
@@ -215,8 +215,8 @@ func (worker *Worker) processMessage(parentContext context.Context, message jets
 
 	worker.logger.Infof("Processing Page %d for Workflow %s", event.PageNumber, event.Header.WorkflowID)
 
-	if error := message.InProgress(); error != nil {
-		worker.logger.Warnf("Failed to signal InProgress: %v", error)
+	if inProgressError := message.InProgress(); inProgressError != nil {
+		worker.logger.Warnf("Failed to signal InProgress: %v", inProgressError)
 	}
 
 	stopKeepAlive := worker.keepAlive(processingContext, message)
@@ -233,7 +233,7 @@ func (worker *Worker) processMessage(parentContext context.Context, message jets
 	}
 }
 
-func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) func() {
+func (worker *Worker) keepAlive(requestContext context.Context, message jetstream.Msg) func() {
 	ticker := time.NewTicker(10 * time.Second)
 	done := make(chan struct{})
 
@@ -241,13 +241,13 @@ func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) 
 		defer ticker.Stop()
 		for {
 			select {
-			case <-context.Done():
+			case <-requestContext.Done():
 				return
 			case <-done:
 				return
 			case <-ticker.C:
-				if error := message.InProgress(); error != nil {
-					worker.logger.Warnf("Failed to send keep-alive signal: %v", error)
+				if inProgressError := message.InProgress(); inProgressError != nil {
+					worker.logger.Warnf("Failed to send keep-alive signal: %v", inProgressError)
 				}
 			}
 		}
@@ -258,9 +258,9 @@ func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) 
 	}
 }
 
-func (worker *Worker) handleProcessingFailure(context context.Context, message jetstream.Msg, payload []byte) {
-	metadata, error := message.Metadata()
-	if error == nil {
+func (worker *Worker) handleProcessingFailure(requestContext context.Context, message jetstream.Msg, payload []byte) {
+	metadata, metadataError := message.Metadata()
+	if metadataError == nil {
 		if metadata.NumDelivered < 10 {
 			worker.logger.Warnf("Processing failed (Attempt %d/10). Retrying in 20s...", metadata.NumDelivered)
 			_ = message.NakWithDelay(20 * time.Second)
@@ -276,7 +276,7 @@ func (worker *Worker) handleProcessingFailure(context context.Context, message j
 	}
 
 	for attempt := 1; attempt <= DeadLetterQueuePublishMaxRetries; attempt++ {
-		if _, error := worker.jetStreamPublisher.Publish(context, worker.deadLetterQueueSubject, payload); error == nil {
+		if _, publishError := worker.jetStreamPublisher.Publish(requestContext, worker.deadLetterQueueSubject, payload); publishError == nil {
 			_ = message.Ack()
 			return
 		}
@@ -286,33 +286,35 @@ func (worker *Worker) handleProcessingFailure(context context.Context, message j
 	_ = message.NakWithDelay(DeadLetterQueueBackoffDuration)
 }
 
-func (worker *Worker) executeTTSJob(context context.Context, event *events.TextProcessedEvent) error {
+func (worker *Worker) executeTTSJob(requestContext context.Context, event *events.TextProcessedEvent) error {
 	// 0a. Publish TTS Started
-	if error := worker.publishTTSStarted(context, event); error != nil {
-		worker.logger.Warnf("Failed to publish TTS started event: %v", error)
+	if publishStartedError := worker.publishTTSStarted(requestContext, event); publishStartedError != nil {
+		worker.logger.Warnf("Failed to publish TTS started event: %v", publishStartedError)
 	}
 
 	// 0b. Request Background Music Generation (Page 1 Only)
 	if event.PageNumber == 1 && event.Settings != nil && event.Settings.AudioSessionConfig != nil && event.Settings.AudioSessionConfig.MusicPrompt != "" {
 		worker.logger.Infof("Requesting background music generation for Workflow %s", event.Header.WorkflowID)
-		if error := worker.publishMusicRequest(context, event.Header, event.Settings.AudioSessionConfig.MusicPrompt, 180); error != nil {
-			worker.logger.Errorf("Failed to publish music request: %v", error)
+		if publishMusicRequestError := worker.publishMusicRequest(requestContext, event.Header, event.Settings.AudioSessionConfig.MusicPrompt, 180, event.Settings.AudioSessionConfig.GenerationConfig); publishMusicRequestError != nil {
+			worker.logger.Errorf("Failed to publish music request: %v", publishMusicRequestError)
 		}
 	}
 
 	// 1. Get Text
-	cleanText, error := worker.retrieveAndCleanText(context, event.TextKey)
-	if error != nil {
-		return error
+	cleanText, retrievalError := worker.retrieveAndCleanText(requestContext, event.TextKey)
+	if retrievalError != nil {
+		return retrievalError
 	}
 
 	// 2. Create TTS Configuration
 	var ttsConfiguration core.TTSConfig
 	if event.Settings != nil && event.Settings.AudioSessionConfig != nil {
 		ttsConfiguration = core.TTSConfig{
-			SessionID:   event.Settings.AudioSessionConfig.SessionID,
-			VoiceID:     event.Settings.AudioSessionConfig.VoiceID,
-			MusicPrompt: event.Settings.AudioSessionConfig.MusicPrompt,
+			SessionID:     event.Settings.AudioSessionConfig.SessionID,
+			VoiceID:       event.Settings.AudioSessionConfig.VoiceID,
+			VoiceStyle:    event.Settings.AudioSessionConfig.VoiceStyle,
+			MusicPrompt:   event.Settings.AudioSessionConfig.MusicPrompt,
+			TextDirective: event.Settings.AudioSessionConfig.TextDirective,
 		}
 	}
 
@@ -321,16 +323,17 @@ func (worker *Worker) executeTTSJob(context context.Context, event *events.TextP
 	if strings.Contains(string(cleanText), NoSpeechMarker) {
 		audioData = audio.GenerateSilentWav(1*time.Second, AudioSampleRateHz, 1, 32)
 	} else {
-		audioData, error = worker.ttsProcessor.Process(context, cleanText, ttsConfiguration)
-		if error != nil {
-			return fmt.Errorf("TTS generation failed: %w", error)
+		var generationError error
+		audioData, generationError = worker.ttsProcessor.Process(requestContext, cleanText, ttsConfiguration)
+		if generationError != nil {
+			return fmt.Errorf("TTS generation failed: %w", generationError)
 		}
 	}
 
 	// 4. Store Audio Chunk
 	audioChunkKey := fmt.Sprintf(AudioChunkKeyFormat, event.Header.WorkflowID, event.PageNumber)
-	if error := worker.audioObjectStore.Upload(context, audioChunkKey, audioData); error != nil {
-		return fmt.Errorf("audio upload failed: %w", error)
+	if uploadError := worker.audioObjectStore.Upload(requestContext, audioChunkKey, audioData); uploadError != nil {
+		return fmt.Errorf("audio upload failed: %w", uploadError)
 	}
 
 	// 5. Publish Completion Event
@@ -341,31 +344,31 @@ func (worker *Worker) executeTTSJob(context context.Context, event *events.TextP
 		AudioKey:   audioChunkKey,
 	}
 
-	return worker.publishTTSCompleted(context, &completionEvent)
+	return worker.publishTTSCompleted(requestContext, &completionEvent)
 }
 
-func (worker *Worker) retrieveAndCleanText(context context.Context, textKey string) ([]byte, error) {
-	textContent, error := worker.textObjectStore.Download(context, textKey)
-	if error != nil {
-		return nil, fmt.Errorf("download text failed: %w", error)
+func (worker *Worker) retrieveAndCleanText(requestContext context.Context, textKey string) ([]byte, error) {
+	textContent, downloadError := worker.textObjectStore.Download(requestContext, textKey)
+	if downloadError != nil {
+		return nil, fmt.Errorf("download text failed: %w", downloadError)
 	}
 
 	var textSegments []string
-	if jsonError := json.Unmarshal(textContent, &textSegments); jsonError == nil {
-		joinedText := ""
-		for index, segment := range textSegments {
-			if index > 0 {
-				joinedText += "\n\n"
-			}
-			joinedText += segment
-		}
-		return []byte(joinedText), nil
+	if jsonError := json.Unmarshal(textContent, &textSegments); jsonError != nil {
+		return nil, fmt.Errorf("failed to unmarshal text segments (contract violation): %w", jsonError)
 	}
 
-	return textContent, nil
+	joinedText := ""
+	for index, segment := range textSegments {
+		if index > 0 {
+			joinedText += "\n\n"
+		}
+		joinedText += segment
+	}
+	return []byte(joinedText), nil
 }
 
-func (worker *Worker) publishTTSStarted(context context.Context, source *events.TextProcessedEvent) error {
+func (worker *Worker) publishTTSStarted(requestContext context.Context, source *events.TextProcessedEvent) error {
 	if worker.ttsStartedSubject == "" {
 		return nil
 	}
@@ -376,51 +379,51 @@ func (worker *Worker) publishTTSStarted(context context.Context, source *events.
 		TotalPages: source.TotalPages,
 	}
 
-	data, error := json.Marshal(event)
-	if error != nil {
-		return error
+	data, marshalError := json.Marshal(event)
+	if marshalError != nil {
+		return marshalError
 	}
 
-	_, error = worker.jetStreamPublisher.Publish(context, worker.ttsStartedSubject, data)
-	return error
+	_, publishError := worker.jetStreamPublisher.Publish(requestContext, worker.ttsStartedSubject, data)
+	return publishError
 }
 
-func (worker *Worker) publishMusicRequest(context context.Context, header events.EventHeader, prompt string, duration int) error {
+func (worker *Worker) publishMusicRequest(requestContext context.Context, header events.EventHeader, prompt string, duration int, config *events.LyriaGenerationConfig) error {
 	if worker.musicRequestSubject == "" {
 		return nil
 	}
 
 	event := events.MusicRequestEvent{
-		Header:          header,
-		Prompt:          prompt,
-		DurationSeconds: duration,
+		Header:           header,
+		Prompt:           prompt,
+		DurationSeconds:  duration,
+		GenerationConfig: config,
 	}
 
-	data, error := json.Marshal(event)
-	if error != nil {
-		return error
+	data, marshalError := json.Marshal(event)
+	if marshalError != nil {
+		return marshalError
 	}
 
-	_, error = worker.jetStreamPublisher.Publish(context, worker.musicRequestSubject, data)
-	return error
+	_, publishError := worker.jetStreamPublisher.Publish(requestContext, worker.musicRequestSubject, data)
+	return publishError
 }
 
-func (worker *Worker) publishTTSCompleted(context context.Context, event *events.TTSCompletedEvent) error {
-	data, error := json.Marshal(event)
-	if error != nil {
-		return fmt.Errorf("marshal event failed: %w", error)
+func (worker *Worker) publishTTSCompleted(requestContext context.Context, event *events.TTSCompletedEvent) error {
+	data, marshalError := json.Marshal(event)
+	if marshalError != nil {
+		return fmt.Errorf("marshal event failed: %w", marshalError)
 	}
-	if _, error := worker.jetStreamPublisher.Publish(context, worker.producerSubject, data); error != nil {
-		return fmt.Errorf("publish event failed: %w", error)
+	if _, publishError := worker.jetStreamPublisher.Publish(requestContext, worker.producerSubject, data); publishError != nil {
+		return fmt.Errorf("publish event failed: %w", publishError)
 	}
 	return nil
 }
 
 func (worker *Worker) parseAndValidateEvent(message jetstream.Msg) (*events.TextProcessedEvent, error) {
 	var event events.TextProcessedEvent
-	if error := json.Unmarshal(message.Data(), &event); error != nil {
-		return nil, error
+	if unmarshalError := json.Unmarshal(message.Data(), &event); unmarshalError != nil {
+		return nil, unmarshalError
 	}
 	return &event, nil
 }
-

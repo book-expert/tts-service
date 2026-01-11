@@ -25,13 +25,13 @@ type SpeechClient struct {
 	logger     *logger.Logger
 }
 
-func NewSpeechClient(baseURL string, log *logger.Logger) *SpeechClient {
+func NewSpeechClient(baseURL string, serviceLogger *logger.Logger) *SpeechClient {
 	return &SpeechClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: RequestTimeout,
 		},
-		logger: log,
+		logger: serviceLogger,
 	}
 }
 
@@ -49,39 +49,39 @@ type MusicRequest struct {
 
 // GenerateSpeech calls the audio-server to generate speech.
 // It returns a stream of the WAV audio. The caller is responsible for closing the stream.
-func (c *SpeechClient) GenerateSpeech(ctx context.Context, chunks []string, voiceID, promptText string) (io.ReadCloser, error) {
+func (speechClient *SpeechClient) GenerateSpeech(requestContext context.Context, chunks []string, voiceID, promptText string) (io.ReadCloser, error) {
 	payload := SpeechRequest{
 		Chunks:     chunks,
 		VoiceID:    voiceID,
 		PromptText: promptText,
 	}
 
-	return c.postRequest(ctx, EndpointSpeech, payload)
+	return speechClient.postRequest(requestContext, EndpointSpeech, payload)
 }
 
-func (c *SpeechClient) postRequest(ctx context.Context, endpoint string, payload interface{}) (io.ReadCloser, error) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+func (speechClient *SpeechClient) postRequest(requestContext context.Context, endpoint string, payload interface{}) (io.ReadCloser, error) {
+	data, marshalError := json.Marshal(payload)
+	if marshalError != nil {
+		return nil, fmt.Errorf("marshal request: %w", marshalError)
 	}
 
-	url := c.baseURL + endpoint
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+	targetURL := speechClient.baseURL + endpoint
+	httpRequest, creationError := http.NewRequestWithContext(requestContext, "POST", targetURL, bytes.NewBuffer(data))
+	if creationError != nil {
+		return nil, fmt.Errorf("create request: %w", creationError)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("audio server error (%d): %s", resp.StatusCode, string(body))
+	httpResponse, executionError := speechClient.httpClient.Do(httpRequest)
+	if executionError != nil {
+		return nil, fmt.Errorf("http request failed: %w", executionError)
 	}
 
-	return resp.Body, nil
+	if httpResponse.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(httpResponse.Body)
+		_ = httpResponse.Body.Close()
+		return nil, fmt.Errorf("audio server error (%d): %s", httpResponse.StatusCode, string(responseBody))
+	}
+
+	return httpResponse.Body, nil
 }
