@@ -7,6 +7,7 @@ require github.com/book-expert/common-events v0.0.1
 replace github.com/book-expert/common-events v0.0.1 => ../common-events
 
 require (
+	github.com/book-expert/common-worker v0.0.1
 	github.com/book-expert/logger v0.1.4
 	github.com/nats-io/nats.go v1.46.1
 	github.com/pelletier/go-toml/v2 v2.2.4
@@ -19,3 +20,5 @@ require (
 	golang.org/x/crypto v0.42.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 )
+
+replace github.com/book-expert/common-worker v0.0.1 => ../common-worker
