@@ -13,7 +13,7 @@ Operating as a central coordinator in the processing pipeline, the TTS Service l
 - **Contextual Synthesis**: Propagates voice profiles and style directives (from document analysis) to ensure consistent narration.
 - **Background Music Coordination**: Triggers music requests to the `soundscape-service` for each job, ensuring audio artifacts are ready for final mixing.
 - **Sequential Chunking**: Intelligently splits text into chunks for optimal synthesis performance and stability on the inference engine.
-- **Event-Driven Resilience**: Implements a robust NATS worker pattern with explicit ACK/NAK handling and dead-letter queue (DLQ) support.
+- **Event-Driven Resilience**: Implements a robust NATS worker pattern powered by the `common-worker` library, with explicit ACK/NAK handling and dead-letter queue (DLQ) support.
 
 ## Requirements
 
