@@ -17,8 +17,3 @@ require (
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 )
-
-replace (
-	github.com/book-expert/common-events v0.0.3 => ../common-events
-	github.com/book-expert/common-worker v0.0.3 => ../common-worker
-)
