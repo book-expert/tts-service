@@ -37,5 +37,5 @@ text_bucket = "TEXT_FILES"
 tts_bucket = "TTS_FILES"
 
 [nats.kv]
-progress_bucket = "TTS_PROGRESS"
+progress_bucket = "WORKFLOW_PROGRESS"
 

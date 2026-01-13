@@ -1,3 +1,5 @@
+// DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS
+
 /* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
 package worker
@@ -19,7 +21,7 @@ import (
 )
 
 const (
-	// MessageProcessingTimeout defines the maximum duration allowed for processing a single TTS job.
+	// MessageProcessingTimeout defines the maximum duration allowed for processing a single TextToSpeech job.
 	MessageProcessingTimeout = 3600 * time.Second
 
 	// DeadLetterQueuePublishMaxRetries defines the number of attempts to publish a failed message to the DLQ.
@@ -62,7 +64,7 @@ type Worker struct {
 	audioObjectStore          core.ObjectStore
 	progressKeyValueStore     jetstream.KeyValue
 	textToSpeechProcessor     core.TTSProcessor
-	logger                    *logger.Logger
+	serviceLogger             *logger.Logger
 }
 
 // New initializes a new Worker with all necessary dependencies.
@@ -101,7 +103,7 @@ func New(
 		audioObjectStore:           audioObjectStore,
 		progressKeyValueStore:      progressKeyValueStore,
 		textToSpeechProcessor:      textToSpeechProcessor,
-		logger:                     serviceLogger,
+		serviceLogger:              serviceLogger,
 	}
 
 	configuration := worker.Config{
@@ -125,10 +127,10 @@ func (textToSpeechWorker *Worker) handleMessage(requestContext context.Context, 
 	processingContext, cancelProcessing := context.WithTimeout(requestContext, MessageProcessingTimeout)
 	defer cancelProcessing()
 
-	textToSpeechWorker.logger.Infof("Processing Page %d for Workflow %s", event.PageNumber, event.Header.WorkflowID)
+	textToSpeechWorker.serviceLogger.Infof("Processing Page %d for Workflow %s", event.PageNumber, event.Header.WorkflowIdentifier)
 
 	if executionError := textToSpeechWorker.executeJob(processingContext, event); executionError != nil {
-		textToSpeechWorker.logger.Errorf("Job execution failed: %v", executionError)
+		textToSpeechWorker.serviceLogger.Errorf("Job execution failed: %v", executionError)
 		textToSpeechWorker.handleProcessingFailure(processingContext, message, message.Data())
 		return executionError
 	}
@@ -140,13 +142,13 @@ func (textToSpeechWorker *Worker) handleProcessingFailure(requestContext context
 	metadata, metadataError := message.Metadata()
 	if metadataError == nil {
 		if metadata.NumDelivered < 10 {
-			textToSpeechWorker.logger.Warnf("Processing failed (Attempt %d/10). Retrying in 20s...", metadata.NumDelivered)
+			textToSpeechWorker.serviceLogger.Warnf("Processing failed (Attempt %d/10). Retrying in 20s...", metadata.NumDelivered)
 			_ = message.NakWithDelay(20 * time.Second)
 			return
 		}
 	}
 
-	textToSpeechWorker.logger.Errorf("Processing failed after attempts. Moving to DLQ.")
+	textToSpeechWorker.serviceLogger.Errorf("Processing failed after attempts. Moving to DLQ.")
 
 	if textToSpeechWorker.deadLetterQueueSubject == "" {
 		_ = message.Nak()
@@ -167,14 +169,14 @@ func (textToSpeechWorker *Worker) handleProcessingFailure(requestContext context
 func (textToSpeechWorker *Worker) executeJob(requestContext context.Context, event *events.TextProcessedEvent) error {
 	// 0a. Publish Text-To-Speech Started
 	if publishStartedError := textToSpeechWorker.publishStarted(requestContext, event); publishStartedError != nil {
-		textToSpeechWorker.logger.Warnf("Failed to publish text-to-speech started event: %v", publishStartedError)
+		textToSpeechWorker.serviceLogger.Warnf("Failed to publish text-to-speech started event: %v", publishStartedError)
 	}
 
 	// 0b. Request Background Music Generation (Page 1 Only)
 	if event.PageNumber == 1 && event.Settings != nil && event.Settings.AudioSessionConfig != nil && event.Settings.AudioSessionConfig.MusicPrompt != "" {
-		textToSpeechWorker.logger.Infof("Requesting background music generation for Workflow %s", event.Header.WorkflowID)
+		textToSpeechWorker.serviceLogger.Infof("Requesting background music generation for Workflow %s", event.Header.WorkflowIdentifier)
 		if publishMusicRequestError := textToSpeechWorker.publishMusicRequest(requestContext, event.Header, event.Settings.AudioSessionConfig.MusicPrompt, 180, event.Settings.AudioSessionConfig.GenerationConfig); publishMusicRequestError != nil {
-			textToSpeechWorker.logger.Errorf("Failed to publish music request: %v", publishMusicRequestError)
+			textToSpeechWorker.serviceLogger.Errorf("Failed to publish music request: %v", publishMusicRequestError)
 		}
 	}
 
@@ -184,12 +186,12 @@ func (textToSpeechWorker *Worker) executeJob(requestContext context.Context, eve
 		return retrievalError
 	}
 
-	// 2. Create TTS Configuration
+	// 2. Create TextToSpeech Configuration
 	var textToSpeechConfiguration core.TTSConfig
 	if event.Settings != nil && event.Settings.AudioSessionConfig != nil {
 		textToSpeechConfiguration = core.TTSConfig{
-			SessionID:     event.Settings.AudioSessionConfig.SessionID,
-			VoiceID:       event.Settings.AudioSessionConfig.VoiceID,
+			SessionID:     event.Settings.AudioSessionConfig.SessionIdentifier,
+			VoiceID:       event.Settings.AudioSessionConfig.VoiceIdentifier,
 			VoiceStyle:    event.Settings.AudioSessionConfig.VoiceStyle,
 			MusicPrompt:   event.Settings.AudioSessionConfig.MusicPrompt,
 			TextDirective: event.Settings.AudioSessionConfig.TextDirective,
@@ -209,13 +211,13 @@ func (textToSpeechWorker *Worker) executeJob(requestContext context.Context, eve
 	}
 
 	// 4. Store Audio Chunk
-	audioChunkKey := fmt.Sprintf(AudioChunkKeyFormat, event.Header.WorkflowID, event.PageNumber)
+	audioChunkKey := fmt.Sprintf(AudioChunkKeyFormat, event.Header.WorkflowIdentifier, event.PageNumber)
 	if uploadError := textToSpeechWorker.audioObjectStore.Upload(requestContext, audioChunkKey, audioData); uploadError != nil {
 		return fmt.Errorf("audio upload failed: %w", uploadError)
 	}
 
 	// 5. Publish Completion Event
-	completionEvent := events.TTSCompletedEvent{
+	completionEvent := events.TextToSpeechCompletedEvent{
 		Header:     event.Header,
 		PageNumber: event.PageNumber,
 		TotalPages: event.TotalPages,
@@ -251,7 +253,7 @@ func (textToSpeechWorker *Worker) publishStarted(requestContext context.Context,
 		return nil
 	}
 
-	event := events.TTSStartedEvent{
+	event := events.TextToSpeechStartedEvent{
 		Header:     source.Header,
 		PageNumber: source.PageNumber,
 		TotalPages: source.TotalPages,
@@ -266,7 +268,7 @@ func (textToSpeechWorker *Worker) publishStarted(requestContext context.Context,
 	return publishError
 }
 
-func (textToSpeechWorker *Worker) publishMusicRequest(requestContext context.Context, header events.EventHeader, prompt string, duration int, config *events.LyriaGenerationConfig) error {
+func (textToSpeechWorker *Worker) publishMusicRequest(requestContext context.Context, header events.EventHeader, prompt string, duration int, configuration *events.LyriaGenerationConfig) error {
 	if textToSpeechWorker.musicRequestSubject == "" {
 		return nil
 	}
@@ -275,7 +277,7 @@ func (textToSpeechWorker *Worker) publishMusicRequest(requestContext context.Con
 		Header:           header,
 		Prompt:           prompt,
 		DurationSeconds:  duration,
-		GenerationConfig: config,
+		GenerationConfig: configuration,
 	}
 
 	data, marshalError := json.Marshal(event)
@@ -287,7 +289,7 @@ func (textToSpeechWorker *Worker) publishMusicRequest(requestContext context.Con
 	return publishError
 }
 
-func (textToSpeechWorker *Worker) publishCompleted(requestContext context.Context, event *events.TTSCompletedEvent) error {
+func (textToSpeechWorker *Worker) publishCompleted(requestContext context.Context, event *events.TextToSpeechCompletedEvent) error {
 	data, marshalError := json.Marshal(event)
 	if marshalError != nil {
 		return fmt.Errorf("marshal event failed: %w", marshalError)
