@@ -7,7 +7,6 @@ require (
 	github.com/book-expert/common-worker v0.0.4
 	github.com/book-expert/logger v0.1.4
 	github.com/nats-io/nats.go v1.46.1
-	github.com/pelletier/go-toml/v2 v2.2.4
 )
 
 require (

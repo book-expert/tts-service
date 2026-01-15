@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/audio"
 	"github.com/book-expert/tts-service/internal/config"
@@ -21,7 +22,6 @@ import (
 
 const (
 	NatsConnectionTimeout = 30 * time.Second
-	ConfigFileName        = "project.toml"
 	LogFileName           = "tts-service.log"
 )
 
@@ -30,14 +30,14 @@ type Application struct {
 	logger           *logger.Logger
 	natsConnection   *nats.Conn
 	jetStreamContext jetstream.JetStream
-	workerInstance   *worker.Worker
+	processor        *worker.Processor
 }
 
 func main() {
 	systemContext, cancelSystemContext := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancelSystemContext()
 
-	serviceConfiguration, configurationError := config.Load(ConfigFileName)
+	serviceConfiguration, configurationError := config.Load("")
 	if configurationError != nil {
 		os.Exit(1)
 	}
@@ -54,7 +54,7 @@ func main() {
 	}
 	defer serviceApplication.cleanup()
 
-	if runError := serviceApplication.workerInstance.Run(systemContext); runError != nil {
+	if runError := serviceApplication.processor.Start(systemContext); runError != nil {
 		serviceLogger.Errorf("Service execution failed: %v", runError)
 		os.Exit(1)
 	}
@@ -66,16 +66,10 @@ func newApplication(systemContext context.Context, serviceConfiguration *config.
 		return nil, natsConnectError
 	}
 
-	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(systemContext, jetStreamContext, serviceConfiguration)
+	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(systemContext, jetStreamContext)
 	if objectStoreBindError != nil {
 		natsConnection.Close()
 		return nil, objectStoreBindError
-	}
-
-	progressKeyValueStore, kvStoreInitError := setupProgressStore(systemContext, jetStreamContext, serviceConfiguration)
-	if kvStoreInitError != nil {
-		natsConnection.Close()
-		return nil, kvStoreInitError
 	}
 
 	speechClient := audio.NewSpeechClient(serviceConfiguration.TTS.AudioServerURL, serviceLogger)
@@ -87,30 +81,26 @@ func newApplication(systemContext context.Context, serviceConfiguration *config.
 		serviceConfiguration.TTS.SpeechConcurrency,
 	)
 
-	workerInstance, workerInitError := worker.New(
+	processorInstance, processorInitError := worker.NewProcessor(
 		natsConnection,
 		jetStreamContext,
 		jetStreamContext,
-		serviceConfiguration.NATS.Consumer.StreamName,
-		serviceConfiguration.NATS.Consumer.SubjectFilter,
+		events.StreamTextFiles,
+		events.SubjectExtractionCompleted,
 		serviceConfiguration.NATS.Consumer.DurableName,
-		serviceConfiguration.NATS.Producer.SubjectName,
-		serviceConfiguration.NATS.Producer.TTSStartedSubject,
-		serviceConfiguration.NATS.Producer.MusicStartedSubject,
-		serviceConfiguration.NATS.Producer.MusicRequestSubject,
-		serviceConfiguration.NATS.Producer.MusicCreatedSubject,
-		serviceConfiguration.NATS.Producer.AggregationStartedSubject,
+		events.SubjectTextToSpeechCompleted,
+		events.SubjectTextToSpeechStarted,
+		events.SubjectMusicRequest,
 		serviceConfiguration.NATS.DeadLetterQueueSubject,
 		textObjectStore,
 		ttsObjectStore,
-		progressKeyValueStore,
 		ttsProcessor,
 		serviceLogger,
 		serviceConfiguration.Service.WorkerCount,
 	)
-	if workerInitError != nil {
+	if processorInitError != nil {
 		natsConnection.Close()
-		return nil, workerInitError
+		return nil, processorInitError
 	}
 
 	return &Application{
@@ -118,7 +108,7 @@ func newApplication(systemContext context.Context, serviceConfiguration *config.
 		logger:           serviceLogger,
 		natsConnection:   natsConnection,
 		jetStreamContext: jetStreamContext,
-		workerInstance:   workerInstance,
+		processor:        processorInstance,
 	}, nil
 }
 
@@ -146,20 +136,16 @@ func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.Je
 	return natsConnection, jetStreamContext, nil
 }
 
-func setupObjectStores(serviceContext context.Context, jetStreamContext jetstream.JetStream, configuration *config.Config) (core.ObjectStore, core.ObjectStore, error) {
-	textStore, textStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TextBucketName)
+func setupObjectStores(serviceContext context.Context, jetStreamContext jetstream.JetStream) (core.ObjectStore, core.ObjectStore, error) {
+	textStore, textStoreError := objectstore.New(serviceContext, jetStreamContext, events.BucketTextFiles)
 	if textStoreError != nil {
 		return nil, nil, textStoreError
 	}
 
-	ttsStore, ttsObjectStoreError := objectstore.New(serviceContext, jetStreamContext, configuration.NATS.ObjectStore.TTSBucketName)
+	ttsStore, ttsObjectStoreError := objectstore.New(serviceContext, jetStreamContext, events.BucketTextToSpeech)
 	if ttsObjectStoreError != nil {
 		return nil, nil, ttsObjectStoreError
 	}
 
 	return textStore, ttsStore, nil
-}
-
-func setupProgressStore(serviceContext context.Context, jetStreamContext jetstream.JetStream, configuration *config.Config) (jetstream.KeyValue, error) {
-	return jetStreamContext.KeyValue(serviceContext, configuration.NATS.KeyValueStore.ProgressBucketName)
 }

@@ -1,130 +1,82 @@
 /* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
-// Package config manages the loading and parsing of the service configuration.
-// It maps the project.toml file to strongly typed structures for use throughout the application.
 package config
 
 import (
-	"fmt"
 	"os"
-
-	"github.com/pelletier/go-toml/v2"
+	"strconv"
 )
 
-// DefaultConfigFilename defines the fallback path if none is provided.
-const DefaultConfigFilename = "project.toml"
-
 // Config represents the top-level structure of the service configuration.
-// Why: Using a top-level struct allows for easy deserialization of the entire TOML file.
 type Config struct {
-	Service ServiceSettings `toml:"service"`
-	TTS     TTSSettings     `toml:"tts"`
-	NATS    NATSSettings    `toml:"nats"`
+	Service ServiceSettings
+	TTS     TTSSettings
+	NATS    NATSSettings
 }
 
 // ServiceSettings holds general service settings like logging and concurrency.
 type ServiceSettings struct {
-	LogDirectory string `toml:"log_dir"`
-	WorkerCount  int    `toml:"workers"`
+	LogDirectory string
+	WorkerCount  int
 }
 
 // TTSSettings holds configuration specific to the Text-To-Speech provider.
 type TTSSettings struct {
-	// APIKeyEnvironmentVariable is the name of the env var holding the secret key.
-	// Why: Storing the variable name rather than the key itself prevents secrets from being committed to source control.
-	APIKeyEnvironmentVariable string `toml:"api_key_variable"`
-	BaseURL                   string `toml:"base_url"`
-	AudioServerURL            string `toml:"audio_server_url"`
-	SpeechConcurrency         int    `toml:"speech_concurrency"`
+	APIKeyEnvironmentVariable string
+	BaseURL                   string
+	AudioServerURL            string
+	SpeechConcurrency         int
 }
 
-// NATSSettings holds all NATS-related configuration including connection, streams, and buckets.
+// NATSSettings holds connection information for NATS.
 type NATSSettings struct {
-	URL                    string              `toml:"url"`
-	DeadLetterQueueSubject string              `toml:"dlq_subject"`
-	Consumer               ConsumerSettings    `toml:"consumer"`
-	Producer               ProducerSettings    `toml:"producer"`
-	ObjectStore            ObjectStoreSettings `toml:"object_store"`
-	KeyValueStore          KeyValueSettings    `toml:"key_value_store"`
+	URL                    string
+	DeadLetterQueueSubject string
+	Consumer               ConsumerSettings
 }
 
 // ConsumerSettings defines the JetStream consumer settings.
 type ConsumerSettings struct {
-	StreamName    string `toml:"stream"`
-	SubjectFilter string `toml:"subject"`
-	DurableName   string `toml:"durable"`
+	DurableName string
 }
 
-// ProducerSettings defines the settings for publishing events.
-type ProducerSettings struct {
-	StreamName                string `toml:"stream"`
-	SubjectName               string `toml:"subject"`
-	TTSStartedSubject         string `toml:"tts_started_subject"`
-	MusicStartedSubject       string `toml:"music_started_subject"`
-	MusicRequestSubject       string `toml:"music_request_subject"`
-	MusicCreatedSubject       string `toml:"music_created_subject"`
-	AggregationStartedSubject string `toml:"aggregation_started_subject"`
-}
-
-// ObjectStoreSettings defines the bucket names for storing large payloads.
-type ObjectStoreSettings struct {
-	TextBucketName string `toml:"text_bucket"`
-	TTSBucketName  string `toml:"tts_bucket"`
-}
-
-// KeyValueSettings defines the bucket names for Key-Value storage.
-type KeyValueSettings struct {
-	ProgressBucketName string `toml:"progress_bucket"`
-}
-
-// Load reads and parses the configuration file from the specified path.
-//
-// Why: Centralizes configuration loading logic to ensure consistent behavior across the application.
-func Load(filePath string) (*Config, error) {
-	if filePath == "" {
-		filePath = DefaultConfigFilename
-	}
-
-	configFile, openError := os.Open(filePath)
-	if openError != nil {
-		return nil, fmt.Errorf("failed to open config file at '%s': %w", filePath, openError)
-	}
-	defer func() {
-		// Log to stderr as we might not have a configured logger yet.
-		if closeError := configFile.Close(); closeError != nil {
-			fmt.Fprintf(os.Stderr, "failed to close config file: %v\n", closeError)
-		}
-	}()
-
+// Load retrieves the configuration from environment variables.
+func Load(_ string) (*Config, error) {
 	var configuration Config
-	decoder := toml.NewDecoder(configFile)
-	if decodeError := decoder.Decode(&configuration); decodeError != nil {
-		return nil, fmt.Errorf("failed to decode config file content: %w", decodeError)
-	}
 
-	// Apply Defaults & Overrides
-	if configuration.TTS.SpeechConcurrency == 0 {
-		configuration.TTS.SpeechConcurrency = 1 // Safe default
-	}
+	// Service Settings
+	configuration.Service.LogDirectory = getEnv("TTS_LOG_DIR", "/home/niko/development/logs/tts-logs")
+	configuration.Service.WorkerCount = getEnvInt("TTS_WORKERS", 3)
 
-	// Resolve NATS URL
-	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
-		configuration.NATS.URL = natsURL
-	} else {
-		// Fallback to legacy behavior: resolve via environment variable named in TOML
-		natsURL = os.Getenv(configuration.NATS.URL)
-		if natsURL == "" {
-			return nil, fmt.Errorf("NATS URL environment variable '%s' is not set", configuration.NATS.URL)
-		}
-		configuration.NATS.URL = natsURL
-	}
+	// TTS Settings
+	configuration.TTS.APIKeyEnvironmentVariable = getEnv("TTS_API_KEY_VARIABLE", "GEMINI_API_KEY")
+	configuration.TTS.BaseURL = getEnv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
+	configuration.TTS.AudioServerURL = getEnv("TTS_AUDIO_SERVER_URL", "http://localhost:8001")
+	configuration.TTS.SpeechConcurrency = getEnvInt("TTS_SPEECH_CONCURRENCY", 1)
 
-	if environmentConcurrency := os.Getenv("TTS_SPEECH_CONCURRENCY"); environmentConcurrency != "" {
-		var concurrencyValue int
-		if _, scanError := fmt.Sscanf(environmentConcurrency, "%d", &concurrencyValue); scanError == nil && concurrencyValue > 0 {
-			configuration.TTS.SpeechConcurrency = concurrencyValue
-		}
-	}
+	// NATS Settings
+	configuration.NATS.URL = getEnv("NATS_ADDRESS", "nats://localhost:4222")
+	configuration.NATS.DeadLetterQueueSubject = getEnv("TTS_DLQ_SUBJECT", "tts.dlq")
+	configuration.NATS.Consumer.DurableName = getEnv("TTS_DURABLE_NAME", "tts-consumer")
 
 	return &configuration, nil
+}
+
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	valueStr := getEnv(key, "")
+	if valueStr == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
