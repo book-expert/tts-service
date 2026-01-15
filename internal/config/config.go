@@ -45,38 +45,38 @@ func Load(_ string) (*Config, error) {
 	var configuration Config
 
 	// Service Settings
-	configuration.Service.LogDirectory = getEnv("TTS_LOG_DIR", "/home/niko/development/logs/tts-logs")
-	configuration.Service.WorkerCount = getEnvInt("TTS_WORKERS", 3)
+	configuration.Service.LogDirectory = getEnvironmentVariable("TTS_LOG_DIR", "/home/niko/development/logs/tts-logs")
+	configuration.Service.WorkerCount = getEnvironmentVariableAsInteger("TTS_WORKERS", 3)
 
 	// TTS Settings
-	configuration.TTS.APIKeyEnvironmentVariable = getEnv("TTS_API_KEY_VARIABLE", "GEMINI_API_KEY")
-	configuration.TTS.BaseURL = getEnv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
-	configuration.TTS.AudioServerURL = getEnv("TTS_AUDIO_SERVER_URL", "http://localhost:8001")
-	configuration.TTS.SpeechConcurrency = getEnvInt("TTS_SPEECH_CONCURRENCY", 1)
+	configuration.TTS.APIKeyEnvironmentVariable = "GEMINI_API_KEY"
+	configuration.TTS.BaseURL = getEnvironmentVariable("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
+	configuration.TTS.AudioServerURL = getEnvironmentVariable("TTS_AUDIO_SERVER_URL", "http://localhost:8001")
+	configuration.TTS.SpeechConcurrency = getEnvironmentVariableAsInteger("TTS_SPEECH_CONCURRENCY", 1)
 
 	// NATS Settings
-	configuration.NATS.URL = getEnv("NATS_ADDRESS", "nats://localhost:4222")
-	configuration.NATS.DeadLetterQueueSubject = getEnv("TTS_DLQ_SUBJECT", "tts.dlq")
-	configuration.NATS.Consumer.DurableName = getEnv("TTS_DURABLE_NAME", "tts-consumer")
+	configuration.NATS.URL = getEnvironmentVariable("NATS_ADDRESS", "nats://localhost:4222")
+	configuration.NATS.DeadLetterQueueSubject = getEnvironmentVariable("TTS_DLQ_SUBJECT", "tts.dlq")
+	configuration.NATS.Consumer.DurableName = getEnvironmentVariable("TTS_DURABLE_NAME", "tts-consumer")
 
 	return &configuration, nil
 }
 
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
+func getEnvironmentVariable(keyName, fallbackValue string) string {
+	if value, exists := os.LookupEnv(keyName); exists {
 		return value
 	}
-	return fallback
+	return fallbackValue
 }
 
-func getEnvInt(key string, fallback int) int {
-	valueStr := getEnv(key, "")
-	if valueStr == "" {
-		return fallback
+func getEnvironmentVariableAsInteger(keyName string, fallbackValue int) int {
+	valueString := getEnvironmentVariable(keyName, "")
+	if valueString == "" {
+		return fallbackValue
 	}
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return fallback
+	value, error := strconv.Atoi(valueString)
+	if error != nil {
+		return fallbackValue
 	}
 	return value
 }

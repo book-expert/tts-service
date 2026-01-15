@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,7 +28,7 @@ const (
 
 type Application struct {
 	configuration    *config.Config
-	logger           *logger.Logger
+	serviceLogger    *logger.Logger
 	natsConnection   *nats.Conn
 	jetStreamContext jetstream.JetStream
 	processor        *worker.Processor
@@ -37,51 +38,53 @@ func main() {
 	systemContext, cancelSystemContext := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancelSystemContext()
 
-	serviceConfiguration, configurationError := config.Load("")
-	if configurationError != nil {
+	serviceConfiguration, configurationLoadError := config.Load("")
+	if configurationLoadError != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", configurationLoadError)
 		os.Exit(1)
 	}
 
-	serviceLogger, loggerError := logger.New(serviceConfiguration.Service.LogDirectory, LogFileName)
-	if loggerError != nil {
+	serviceLogger, loggerInitializationError := logger.New(serviceConfiguration.Service.LogDirectory, LogFileName)
+	if loggerInitializationError != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", loggerInitializationError)
 		os.Exit(1)
 	}
 
-	serviceApplication, applicationError := newApplication(systemContext, serviceConfiguration, serviceLogger)
-	if applicationError != nil {
-		serviceLogger.Errorf("Failed to initialize application: %v", applicationError)
+	serviceApplication, applicationInitializationError := newApplication(systemContext, serviceConfiguration, serviceLogger)
+	if applicationInitializationError != nil {
+		serviceLogger.Errorf("Failed to initialize application: %v", applicationInitializationError)
 		os.Exit(1)
 	}
 	defer serviceApplication.cleanup()
 
-	if runError := serviceApplication.processor.Start(systemContext); runError != nil {
-		serviceLogger.Errorf("Service execution failed: %v", runError)
+	if executionError := serviceApplication.processor.Start(systemContext); executionError != nil {
+		serviceLogger.Errorf("Service execution failed: %v", executionError)
 		os.Exit(1)
 	}
 }
 
 func newApplication(systemContext context.Context, serviceConfiguration *config.Config, serviceLogger *logger.Logger) (*Application, error) {
-	natsConnection, jetStreamContext, natsConnectError := setupNatsConnection(serviceConfiguration)
-	if natsConnectError != nil {
-		return nil, natsConnectError
+	natsConnection, jetStreamContext, natsConnectionError := setupNatsConnection(serviceConfiguration)
+	if natsConnectionError != nil {
+		return nil, natsConnectionError
 	}
 
-	textObjectStore, ttsObjectStore, objectStoreBindError := setupObjectStores(systemContext, jetStreamContext)
-	if objectStoreBindError != nil {
+	textObjectStore, textToSpeechObjectStore, objectStoreBindingError := setupObjectStores(systemContext, jetStreamContext)
+	if objectStoreBindingError != nil {
 		natsConnection.Close()
-		return nil, objectStoreBindError
+		return nil, objectStoreBindingError
 	}
 
 	speechClient := audio.NewSpeechClient(serviceConfiguration.TTS.AudioServerURL, serviceLogger)
 	audioMixer := audio.NewMixer(serviceLogger)
-	ttsProcessor := audio.NewProcessor(
+	textToSpeechProcessor := audio.NewProcessor(
 		speechClient,
 		audioMixer,
 		serviceLogger,
 		serviceConfiguration.TTS.SpeechConcurrency,
 	)
 
-	processorInstance, processorInitError := worker.NewProcessor(
+	processorInstance, processorInitializationError := worker.NewProcessor(
 		natsConnection,
 		jetStreamContext,
 		jetStreamContext,
@@ -93,31 +96,31 @@ func newApplication(systemContext context.Context, serviceConfiguration *config.
 		events.SubjectMusicRequest,
 		serviceConfiguration.NATS.DeadLetterQueueSubject,
 		textObjectStore,
-		ttsObjectStore,
-		ttsProcessor,
+		textToSpeechObjectStore,
+		textToSpeechProcessor,
 		serviceLogger,
 		serviceConfiguration.Service.WorkerCount,
 	)
-	if processorInitError != nil {
+	if processorInitializationError != nil {
 		natsConnection.Close()
-		return nil, processorInitError
+		return nil, processorInitializationError
 	}
 
 	return &Application{
 		configuration:    serviceConfiguration,
-		logger:           serviceLogger,
+		serviceLogger:    serviceLogger,
 		natsConnection:   natsConnection,
 		jetStreamContext: jetStreamContext,
 		processor:        processorInstance,
 	}, nil
 }
 
-func (serviceApplication *Application) cleanup() {
-	if serviceApplication.natsConnection != nil {
-		serviceApplication.natsConnection.Close()
+func (application *Application) cleanup() {
+	if application.natsConnection != nil {
+		application.natsConnection.Close()
 	}
-	if serviceApplication.logger != nil {
-		_ = serviceApplication.logger.Close()
+	if application.serviceLogger != nil {
+		_ = application.serviceLogger.Close()
 	}
 }
 
@@ -136,16 +139,16 @@ func setupNatsConnection(configuration *config.Config) (*nats.Conn, jetstream.Je
 	return natsConnection, jetStreamContext, nil
 }
 
-func setupObjectStores(serviceContext context.Context, jetStreamContext jetstream.JetStream) (core.ObjectStore, core.ObjectStore, error) {
-	textStore, textStoreError := objectstore.New(serviceContext, jetStreamContext, events.BucketTextFiles)
+func setupObjectStores(systemContext context.Context, jetStreamContext jetstream.JetStream) (core.ObjectStore, core.ObjectStore, error) {
+	textObjectStore, textStoreError := objectstore.New(systemContext, jetStreamContext, events.BucketTextFiles)
 	if textStoreError != nil {
 		return nil, nil, textStoreError
 	}
 
-	ttsStore, ttsObjectStoreError := objectstore.New(serviceContext, jetStreamContext, events.BucketTextToSpeech)
-	if ttsObjectStoreError != nil {
-		return nil, nil, ttsObjectStoreError
+	textToSpeechObjectStore, textToSpeechObjectStoreError := objectstore.New(systemContext, jetStreamContext, events.BucketTextToSpeech)
+	if textToSpeechObjectStoreError != nil {
+		return nil, nil, textToSpeechObjectStoreError
 	}
 
-	return textStore, ttsStore, nil
+	return textObjectStore, textToSpeechObjectStore, nil
 }
