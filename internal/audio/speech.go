@@ -1,4 +1,5 @@
 /* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
+
 package audio
 
 import (
@@ -20,18 +21,18 @@ const (
 )
 
 type SpeechClient struct {
-	baseURL    string
-	httpClient *http.Client
-	logger     *logger.Logger
+	baseAddress   string
+	httpClient    *http.Client
+	serviceLogger *logger.Logger
 }
 
-func NewSpeechClient(baseURL string, serviceLogger *logger.Logger) *SpeechClient {
+func NewSpeechClient(baseAddress string, serviceLogger *logger.Logger) *SpeechClient {
 	return &SpeechClient{
-		baseURL: baseURL,
+		baseAddress: baseAddress,
 		httpClient: &http.Client{
 			Timeout: RequestTimeout,
 		},
-		logger: serviceLogger,
+		serviceLogger: serviceLogger,
 	}
 }
 
@@ -42,13 +43,11 @@ type SpeechRequest struct {
 }
 
 type MusicRequest struct {
-	Prompt      string `json:"prompt"`
-	DurationSec int    `json:"duration_sec"`
-	// Config can be added if needed
+	Prompt          string `json:"prompt"`
+	DurationSeconds int    `json:"duration_sec"`
 }
 
 // GenerateSpeech calls the audio-server to generate speech.
-// It returns a stream of the WAV audio. The caller is responsible for closing the stream.
 func (speechClient *SpeechClient) GenerateSpeech(requestContext context.Context, chunks []string, voiceIdentifier, promptText string) (io.ReadCloser, error) {
 	payload := SpeechRequest{
 		Chunks:          chunks,
@@ -65,7 +64,7 @@ func (speechClient *SpeechClient) postRequest(requestContext context.Context, en
 		return nil, fmt.Errorf("marshal request: %w", marshalError)
 	}
 
-	targetURL := speechClient.baseURL + endpoint
+	targetURL := speechClient.baseAddress + endpoint
 	httpRequest, creationError := http.NewRequestWithContext(requestContext, "POST", targetURL, bytes.NewBuffer(data))
 	if creationError != nil {
 		return nil, fmt.Errorf("create request: %w", creationError)

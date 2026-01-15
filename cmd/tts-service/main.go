@@ -76,10 +76,10 @@ func newApplication(systemContext context.Context, serviceConfiguration *config.
 	}
 
 	speechClient := audio.NewSpeechClient(serviceConfiguration.TTS.AudioServerURL, serviceLogger)
-	audioMixer := audio.NewMixer(serviceLogger)
+	audioStitcher := audio.NewStitcher(serviceLogger)
 	textToSpeechProcessor := audio.NewProcessor(
 		speechClient,
-		audioMixer,
+		audioStitcher,
 		serviceLogger,
 		serviceConfiguration.TTS.SpeechConcurrency,
 	)

@@ -14,20 +14,17 @@ import (
 )
 
 // Processor implements core.TTSProcessor.
-// It coordinates:
-// 1. Text -> Speech (via Audio Client/Audio Server)
-// 2. Speech + Music -> Mixed Audio (via Mixer/FFmpeg)
 type Processor struct {
 	speechClient      *SpeechClient
-	audioMixer        *Mixer
-	logger            *logger.Logger
+	audioStitcher     *Stitcher
+	serviceLogger     *logger.Logger
 	speechConcurrency int
 }
 
 // NewProcessor creates a new TTS Processor with all required dependencies.
 func NewProcessor(
 	speechClient *SpeechClient,
-	audioMixer *Mixer,
+	audioStitcher *Stitcher,
 	serviceLogger *logger.Logger,
 	concurrency int,
 ) *Processor {
@@ -36,77 +33,64 @@ func NewProcessor(
 	}
 	return &Processor{
 		speechClient:      speechClient,
-		audioMixer:        audioMixer,
-		logger:            serviceLogger,
+		audioStitcher:     audioStitcher,
+		serviceLogger:     serviceLogger,
 		speechConcurrency: concurrency,
 	}
 }
 
-// Process converts text to speech (48kHz WAV).
-// It implements the "Safe Stitch Protocol":
-// 1. Split Text into logical chunks.
-// 2. Generate discrete WAVs for each chunk (to avoid header corruption).
-// 3. Use FFmpeg Concat Demuxer to stitch them safely.
-// 4. Clean up combined audio and append uniform silence.
+// Process converts text to speech (48kHz WAV) using a safe stitching protocol.
 func (processor *Processor) Process(requestContext context.Context, text []byte, configuration core.TTSConfig) ([]byte, error) {
 	textString := string(text)
 	if textString == "" {
 		return nil, fmt.Errorf("empty text input")
 	}
 
-	processor.logger.Infof("Processor: Starting text processing. SessionIdentifier=%s, VoiceIdentifier=%s", configuration.SessionIdentifier, configuration.VoiceIdentifier)
+	processor.serviceLogger.Infof("Processor: Starting text processing. SessionIdentifier=%s, VoiceIdentifier=%s", configuration.SessionIdentifier, configuration.VoiceIdentifier)
 
-	// 1. Split Text
 	chunks := SplitText(textString)
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no text chunks found after splitting")
 	}
 
-	// 2. Generate Speech per Chunk (Safe Stitch)
 	var chunkFiles []string
-
-	// Ensure we cleanup all intermediate chunks even if we error out midway
 	defer func() {
 		for _, file := range chunkFiles {
-			// We ignore errors here as the file might have been moved or already deleted
 			_ = os.Remove(file)
 		}
 	}()
 
 	for index, chunk := range chunks {
-		processor.logger.Infof("Processor: Generating chunk %d/%d (%d chars)", index+1, len(chunks), len(chunk.Text))
+		processor.serviceLogger.Infof("Processor: Generating chunk %d/%d (%d chars)", index+1, len(chunks), len(chunk.Text))
 
 		startTime := time.Now()
 
-		// Request specific chunk only (Single string in slice)
 		stream, generationError := processor.speechClient.GenerateSpeech(requestContext, []string{chunk.Text}, configuration.VoiceIdentifier, "")
 		if generationError != nil {
 			return nil, fmt.Errorf("chunk %d generation failed: %w", index, generationError)
 		}
 
-		// Save stream to temp file immediately
 		temporaryFile, creationError := os.CreateTemp("", fmt.Sprintf("chunk_%d_*.wav", index))
 		if creationError != nil {
 			_ = stream.Close()
 			return nil, fmt.Errorf("create temp file for chunk %d failed: %w", index, creationError)
 		}
 
-		// Copy stream to file
 		bytesWritten, copyError := io.Copy(temporaryFile, stream)
-		_ = stream.Close()        // Close network stream
-		_ = temporaryFile.Close() // Close file handle to flush buffer
+		_ = stream.Close()
+		_ = temporaryFile.Close()
 
 		if copyError != nil {
 			return nil, fmt.Errorf("write chunk %d failed: %w", index, copyError)
 		}
 
 		if bytesWritten == 0 {
-			processor.logger.Warnf("Chunk %d resulted in 0 bytes audio", index)
+			processor.serviceLogger.Warnf("Chunk %d resulted in 0 bytes audio", index)
 			_ = os.Remove(temporaryFile.Name())
 			continue
 		}
 
-		processor.logger.Infof("Chunk %d generated in %v (Size: %d bytes)", index+1, time.Since(startTime), bytesWritten)
+		processor.serviceLogger.Infof("Chunk %d generated in %v (Size: %d bytes)", index+1, time.Since(startTime), bytesWritten)
 		chunkFiles = append(chunkFiles, temporaryFile.Name())
 	}
 
@@ -114,12 +98,10 @@ func (processor *Processor) Process(requestContext context.Context, text []byte,
 		return nil, fmt.Errorf("no audio chunks were successfully generated")
 	}
 
-	// 3. Combine Chunks (Raw Content)
-	// We do NOT trim here anymore. We rely on the "Sandwich & Press" strategy.
-	processor.logger.Infof("Processor: Combining %d chunks into page content...", len(chunkFiles))
-	rawContentBytes, combineError := processor.audioMixer.Combine(requestContext, chunkFiles)
-	if combineError != nil {
-		return nil, fmt.Errorf("combine chunks failed: %w", combineError)
+	processor.serviceLogger.Infof("Processor: Stitching %d chunks into page content...", len(chunkFiles))
+	rawContentBytes, stitchError := processor.audioStitcher.Stitch(requestContext, chunkFiles)
+	if stitchError != nil {
+		return nil, fmt.Errorf("stitch chunks failed: %w", stitchError)
 	}
 
 	rawContentPath, writeError := writeTempFile("raw_content_*.wav", rawContentBytes)
@@ -128,7 +110,7 @@ func (processor *Processor) Process(requestContext context.Context, text []byte,
 	}
 	defer func() { _ = os.Remove(rawContentPath) }()
 
-	// 4. Sandwich Strategy: [1s Silence] + [Content] + [1s Silence]
+	// Sandwich Strategy: [1s Silence] + [Content] + [1s Silence]
 	silenceWav := GenerateSilentWav(1*time.Second, 48000, 1, 32)
 	silencePath, silenceCreationError := writeTempFile("silence_pad_*.wav", silenceWav)
 	if silenceCreationError != nil {
@@ -136,17 +118,16 @@ func (processor *Processor) Process(requestContext context.Context, text []byte,
 	}
 	defer func() { _ = os.Remove(silencePath) }()
 
-	processor.logger.Infof("Processor: Applying 1s padding to start and end of page...")
-	finalBytes, finalCombineError := processor.audioMixer.Combine(requestContext, []string{silencePath, rawContentPath, silencePath})
-	if finalCombineError != nil {
-		return nil, fmt.Errorf("final combine failed: %w", finalCombineError)
+	processor.serviceLogger.Infof("Processor: Applying 1s padding to start and end of page...")
+	finalBytes, finalStitchError := processor.audioStitcher.Stitch(requestContext, []string{silencePath, rawContentPath, silencePath})
+	if finalStitchError != nil {
+		return nil, fmt.Errorf("final stitch failed: %w", finalStitchError)
 	}
 
-	processor.logger.Infof("Processor: Successfully generated padded page audio (%d bytes)", len(finalBytes))
+	processor.serviceLogger.Infof("Processor: Successfully generated padded page audio (%d bytes)", len(finalBytes))
 	return finalBytes, nil
 }
 
-// Helper to write bytes to a temp file and return the path.
 func writeTempFile(pattern string, data []byte) (string, error) {
 	temporaryFile, creationError := os.CreateTemp("", pattern)
 	if creationError != nil {
