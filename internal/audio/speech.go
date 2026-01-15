@@ -36,9 +36,9 @@ func NewSpeechClient(baseURL string, serviceLogger *logger.Logger) *SpeechClient
 }
 
 type SpeechRequest struct {
-	Chunks     []string `json:"chunks"`
-	VoiceID    string   `json:"voice_id"`
-	PromptText string   `json:"prompt_text,omitempty"`
+	Chunks          []string `json:"chunks"`
+	VoiceIdentifier string   `json:"voice_id"`
+	PromptText      string   `json:"prompt_text,omitempty"`
 }
 
 type MusicRequest struct {
@@ -49,11 +49,11 @@ type MusicRequest struct {
 
 // GenerateSpeech calls the audio-server to generate speech.
 // It returns a stream of the WAV audio. The caller is responsible for closing the stream.
-func (speechClient *SpeechClient) GenerateSpeech(requestContext context.Context, chunks []string, voiceID, promptText string) (io.ReadCloser, error) {
+func (speechClient *SpeechClient) GenerateSpeech(requestContext context.Context, chunks []string, voiceIdentifier, promptText string) (io.ReadCloser, error) {
 	payload := SpeechRequest{
-		Chunks:     chunks,
-		VoiceID:    voiceID,
-		PromptText: promptText,
+		Chunks:          chunks,
+		VoiceIdentifier: voiceIdentifier,
+		PromptText:      promptText,
 	}
 
 	return speechClient.postRequest(requestContext, EndpointSpeech, payload)

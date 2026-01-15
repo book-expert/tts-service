@@ -36,6 +36,5 @@ aggregation_started_subject = "tts.aggregation.started"
 text_bucket = "TEXT_FILES"
 tts_bucket = "TTS_FILES"
 
-[nats.kv]
+[nats.key_value_store]
 progress_bucket = "WORKFLOW_PROGRESS"
-

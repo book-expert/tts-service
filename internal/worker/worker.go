@@ -1,5 +1,3 @@
-// DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS
-
 /* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
 package worker
@@ -190,11 +188,11 @@ func (textToSpeechWorker *Worker) executeJob(requestContext context.Context, eve
 	var textToSpeechConfiguration core.TTSConfig
 	if event.Settings != nil && event.Settings.AudioSessionConfig != nil {
 		textToSpeechConfiguration = core.TTSConfig{
-			SessionID:     event.Settings.AudioSessionConfig.SessionIdentifier,
-			VoiceID:       event.Settings.AudioSessionConfig.VoiceIdentifier,
-			VoiceStyle:    event.Settings.AudioSessionConfig.VoiceStyle,
-			MusicPrompt:   event.Settings.AudioSessionConfig.MusicPrompt,
-			TextDirective: event.Settings.AudioSessionConfig.TextDirective,
+			SessionIdentifier: event.Settings.AudioSessionConfig.SessionIdentifier,
+			VoiceIdentifier:   event.Settings.AudioSessionConfig.VoiceIdentifier,
+			VoiceStyle:        event.Settings.AudioSessionConfig.VoiceStyle,
+			MusicPrompt:       event.Settings.AudioSessionConfig.MusicPrompt,
+			TextDirective:     event.Settings.AudioSessionConfig.TextDirective,
 		}
 	}
 

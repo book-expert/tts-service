@@ -48,13 +48,13 @@ func NewProcessor(
 // 2. Generate discrete WAVs for each chunk (to avoid header corruption).
 // 3. Use FFmpeg Concat Demuxer to stitch them safely.
 // 4. Clean up combined audio and append uniform silence.
-func (processor *Processor) Process(requestContext context.Context, text []byte, config core.TTSConfig) ([]byte, error) {
+func (processor *Processor) Process(requestContext context.Context, text []byte, configuration core.TTSConfig) ([]byte, error) {
 	textString := string(text)
 	if textString == "" {
 		return nil, fmt.Errorf("empty text input")
 	}
 
-	processor.logger.Infof("Processor: Starting text processing. SessionID=%s, VoiceID=%s", config.SessionID, config.VoiceID)
+	processor.logger.Infof("Processor: Starting text processing. SessionIdentifier=%s, VoiceIdentifier=%s", configuration.SessionIdentifier, configuration.VoiceIdentifier)
 
 	// 1. Split Text
 	chunks := SplitText(textString)
@@ -79,7 +79,7 @@ func (processor *Processor) Process(requestContext context.Context, text []byte,
 		startTime := time.Now()
 
 		// Request specific chunk only (Single string in slice)
-		stream, generationError := processor.speechClient.GenerateSpeech(requestContext, []string{chunk.Text}, config.VoiceID, "")
+		stream, generationError := processor.speechClient.GenerateSpeech(requestContext, []string{chunk.Text}, configuration.VoiceIdentifier, "")
 		if generationError != nil {
 			return nil, fmt.Errorf("chunk %d generation failed: %w", index, generationError)
 		}

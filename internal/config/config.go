@@ -45,7 +45,7 @@ type NATSSettings struct {
 	Consumer               ConsumerSettings    `toml:"consumer"`
 	Producer               ProducerSettings    `toml:"producer"`
 	ObjectStore            ObjectStoreSettings `toml:"object_store"`
-	KeyValueStore          KeyValueSettings    `toml:"kv"`
+	KeyValueStore          KeyValueSettings    `toml:"key_value_store"`
 }
 
 // ConsumerSettings defines the JetStream consumer settings.

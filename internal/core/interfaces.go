@@ -16,9 +16,9 @@ type TTSProcessor interface {
 
 // TTSConfig holds parameters for a single TTS processing request.
 type TTSConfig struct {
-	SessionID     string
-	VoiceID       string
-	VoiceStyle    string
-	MusicPrompt   string
-	TextDirective string
+	SessionIdentifier        string
+	VoiceIdentifier          string
+	VoiceStyle               string
+	MusicPrompt              string
+	TextDirective            string
 }
