@@ -9,7 +9,7 @@ Operating as the central coordinator in the processing pipeline, the TTS Service
 ## Key Features
 
 - **Distributed Synthesis**: Delegates compute-intensive speech synthesis to the GPU-accelerated `audio-server`.
-- **Workflow State Management**: Utilizes NATS KeyValue store (`TTS_PROGRESS`) to track the status of individual pages and trigger aggregation.
+- **Workflow State Management**: Utilizes NATS KeyValue store (`WORKFLOW_PROGRESS`) to track the status of individual pages and trigger aggregation.
 - **Contextual Synthesis**: Propagates voice profiles and style directives to ensure consistent narration.
 - **Background Music Coordination**: Triggers music requests to the `soundscape-service` for each job.
 - **Sequential Chunking**: Intelligently splits text into chunks for optimal synthesis performance and inference stability.
