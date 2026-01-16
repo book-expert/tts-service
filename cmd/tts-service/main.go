@@ -16,7 +16,7 @@ import (
 	"github.com/book-expert/tts-service/internal/config"
 	"github.com/book-expert/tts-service/internal/core"
 	"github.com/book-expert/tts-service/internal/objectstore"
-	"github.com/book-expert/tts-service/internal/worker"
+	"github.com/book-expert/tts-service/internal/processor"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -31,7 +31,7 @@ type Application struct {
 	serviceLogger    *logger.Logger
 	natsConnection   *nats.Conn
 	jetStreamContext jetstream.JetStream
-	processor        *worker.Processor
+	processor        *processor.Processor
 }
 
 func main() {
@@ -84,7 +84,7 @@ func newApplication(systemContext context.Context, serviceConfiguration *config.
 		serviceConfiguration.TTS.SpeechConcurrency,
 	)
 
-	processorInstance, processorInitializationError := worker.NewProcessor(
+	processorInstance, processorInitializationError := processor.NewProcessor(
 		natsConnection,
 		jetStreamContext,
 		jetStreamContext,
