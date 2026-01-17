@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,10 +24,21 @@ const (
 	MessageProcessingTimeout         = 3600 * time.Second
 	DeadLetterQueuePublishMaxRetries = 3
 	DeadLetterQueueBackoffDuration   = 2 * time.Second
-	AudioSampleRateHz                = 44100
 	AudioChunkKeyFormat              = "%s_page_%d.wav"
 	NoSpeechMarker                   = "[NO_SPEECH]"
 )
+
+func getAudioSampleRateHz() int {
+	rateStr := os.Getenv("AUDIO_SAMPLE_RATE_TTS")
+	if rateStr == "" {
+		return 44100
+	}
+	rate, err := strconv.Atoi(rateStr)
+	if err != nil {
+		return 44100
+	}
+	return rate
+}
 
 type JetStreamPublisher interface {
 	Publish(requestContext context.Context, subject string, data []byte, options ...jetstream.PublishOpt) (*jetstream.PubAck, error)
@@ -182,7 +195,7 @@ func (processor *Processor) executeJob(requestContext context.Context, event *ev
 
 	var audioData []byte
 	if strings.Contains(string(cleanText), NoSpeechMarker) {
-		audioData = audio.GenerateSilentWav(1*time.Second, AudioSampleRateHz, 1, 32)
+		audioData = audio.GenerateSilentWav(1*time.Second, getAudioSampleRateHz(), 1, 32)
 	} else {
 		var generationError error
 		audioData, generationError = processor.textToSpeechProcessor.Process(requestContext, cleanText, textToSpeechConfiguration)

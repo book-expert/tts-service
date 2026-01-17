@@ -86,13 +86,26 @@ func (stitcher *Stitcher) Stitch(requestContext context.Context, inputPaths []st
 
 	// We use the concat filter instead of '-c copy' to ensure stream consistency
 	// and avoid header mismatches that cause the 'helium effect'.
+	sampleRate := os.Getenv("AUDIO_SAMPLE_RATE_TTS")
+	if sampleRate == "" {
+		sampleRate = "44100"
+	}
+	bits := os.Getenv("AUDIO_BITS_PER_SAMPLE")
+	codec := "pcm_s24le"
+	switch bits {
+	case "32":
+		codec = "pcm_s32le"
+	case "16":
+		codec = "pcm_s16le"
+	}
+
 	command := exec.CommandContext(requestContext, "ffmpeg",
 		"-y",
 		"-f", "concat",
 		"-safe", "0",
 		"-i", listFile.Name(),
-		"-ar", "44100",
-		"-c:a", "pcm_s24le",
+		"-ar", sampleRate,
+		"-c:a", codec,
 		outputFile,
 	)
 
