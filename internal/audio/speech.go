@@ -37,9 +37,9 @@ func NewSpeechClient(baseAddress string, serviceLogger *logger.Logger) *SpeechCl
 }
 
 type SpeechRequest struct {
-	Chunks          []string `json:"chunks"`
-	VoiceIdentifier string   `json:"voice_id"`
-	PromptText      string   `json:"prompt_text,omitempty"`
+	Chunks          []string `json:"Chunks"`
+	VoiceIdentifier string   `json:"VoiceIdentifier"`
+	PromptText      string   `json:"PromptText,omitempty"`
 }
 
 type MusicRequest struct {
