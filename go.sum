@@ -1,5 +1,5 @@
-github.com/book-expert/common-events v0.0.7 h1:Nb/m/ys4QDY/SFkOX3oeBHhMm7URTpy+IzzgRCwa374=
-github.com/book-expert/common-events v0.0.7/go.mod h1:ceITZRhfiQ9EuOMpJ6DStvwsE6ujxUCONj5JvXOR9Zk=
+github.com/book-expert/common-events v0.0.9 h1:KeR55QtmzxkPWSZBtcg5woe99jM632oabLf+4zi6OKs=
+github.com/book-expert/common-events v0.0.9/go.mod h1:ceITZRhfiQ9EuOMpJ6DStvwsE6ujxUCONj5JvXOR9Zk=
 github.com/book-expert/common-worker v0.0.7 h1:q+2T+XmQEtAs2wxLtCRe5opTpNACbJPgf4AxlJm+ng4=
 github.com/book-expert/common-worker v0.0.7/go.mod h1:bzRcanfBTXMLD3lkHXEzC7Oc7kfDJ6QgTqf8L9Hf2oY=
 github.com/book-expert/logger v0.1.4 h1:MjnNXxZ7cNV3d1vd+/hd1XBNE8+RTRxyTYubE58sPnM=
