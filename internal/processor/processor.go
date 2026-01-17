@@ -22,7 +22,7 @@ const (
 	MessageProcessingTimeout         = 3600 * time.Second
 	DeadLetterQueuePublishMaxRetries = 3
 	DeadLetterQueueBackoffDuration   = 2 * time.Second
-	AudioSampleRateHz                = 48000
+	AudioSampleRateHz                = 44100
 	AudioChunkKeyFormat              = "%s_page_%d.wav"
 	NoSpeechMarker                   = "[NO_SPEECH]"
 )
@@ -96,19 +96,26 @@ func (processor *Processor) handleMessage(requestContext context.Context, event 
 	processingContext, cancelProcessing := context.WithTimeout(requestContext, MessageProcessingTimeout)
 	defer cancelProcessing()
 
+	if event.TextKey == "" {
+		processor.serviceLogger.Errorf("Received event with empty TextKey for Workflow %s", event.Header.WorkflowIdentifier)
+		_ = message.Term()
+		return fmt.Errorf("empty TextKey")
+	}
+
 	processor.serviceLogger.Infof("Processing Page %d for Workflow %s", event.PageNumber, event.Header.WorkflowIdentifier)
 
 	// Lifecycle: Initialized
-	processor.publishLifecycleEvent(processingContext, event, events.SubjectTextToSpeechInitialized)
+	processor.publishLifecycleEvent(processingContext, event, "", events.SubjectTextToSpeechInitialized)
 
-	if executionError := processor.executeJob(processingContext, event); executionError != nil {
+	audioKey, executionError := processor.executeJob(processingContext, event)
+	if executionError != nil {
 		processor.serviceLogger.Errorf("Job execution failed: %v", executionError)
 		processor.handleProcessingFailure(processingContext, message, message.Data())
 		return executionError
 	}
 
 	// Lifecycle: Completed
-	processor.publishLifecycleEvent(processingContext, event, events.SubjectTextToSpeechCompleted)
+	processor.publishLifecycleEvent(processingContext, event, audioKey, events.SubjectTextToSpeechCompleted)
 
 	return nil
 }
@@ -141,9 +148,9 @@ func (processor *Processor) handleProcessingFailure(requestContext context.Conte
 	_ = message.NakWithDelay(DeadLetterQueueBackoffDuration)
 }
 
-func (processor *Processor) executeJob(requestContext context.Context, event *events.TextCreatedEvent) error {
+func (processor *Processor) executeJob(requestContext context.Context, event *events.TextCreatedEvent) (string, error) {
 	// Lifecycle: Ready
-	processor.publishLifecycleEvent(requestContext, event, events.SubjectTextToSpeechReady)
+	processor.publishLifecycleEvent(requestContext, event, "", events.SubjectTextToSpeechReady)
 
 	// Lifecycle: Started (Publishing 'Started' signal)
 	if publishStartedError := processor.publishStarted(requestContext, event); publishStartedError != nil {
@@ -159,7 +166,7 @@ func (processor *Processor) executeJob(requestContext context.Context, event *ev
 
 	cleanText, retrievalError := processor.retrieveAndCleanText(requestContext, event.TextKey)
 	if retrievalError != nil {
-		return retrievalError
+		return "", retrievalError
 	}
 
 	var textToSpeechConfiguration core.TTSConfig
@@ -180,14 +187,17 @@ func (processor *Processor) executeJob(requestContext context.Context, event *ev
 		var generationError error
 		audioData, generationError = processor.textToSpeechProcessor.Process(requestContext, cleanText, textToSpeechConfiguration)
 		if generationError != nil {
-			return fmt.Errorf("text-to-speech generation failed: %w", generationError)
+			return "", fmt.Errorf("text-to-speech generation failed: %w", generationError)
 		}
 	}
 
 	audioChunkKey := fmt.Sprintf(AudioChunkKeyFormat, event.Header.WorkflowIdentifier, event.PageNumber)
 	if uploadError := processor.audioObjectStore.Upload(requestContext, audioChunkKey, audioData); uploadError != nil {
-		return fmt.Errorf("audio upload failed: %w", uploadError)
+		return "", fmt.Errorf("audio upload failed: %w", uploadError)
 	}
+
+	// Lifecycle: Created (triggers next step - audio-mixer-service)
+	processor.publishLifecycleEvent(requestContext, event, audioChunkKey, events.SubjectTextToSpeechCreated)
 
 	completionEvent := events.TextToSpeechCompletedEvent{
 		Header:     event.Header,
@@ -196,7 +206,7 @@ func (processor *Processor) executeJob(requestContext context.Context, event *ev
 		AudioKey:   audioChunkKey,
 	}
 
-	return processor.publishResult(requestContext, &completionEvent)
+	return audioChunkKey, processor.publishResult(requestContext, &completionEvent)
 }
 
 func (processor *Processor) retrieveAndCleanText(requestContext context.Context, textKey string) ([]byte, error) {
@@ -214,11 +224,12 @@ func (processor *Processor) retrieveAndCleanText(requestContext context.Context,
 	return []byte(joinedText), nil
 }
 
-func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *events.TextCreatedEvent, subject string) {
-	lifecycleEvent := events.TextToSpeechCreatedEvent{
+func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *events.TextCreatedEvent, audioKey, subject string) {
+	lifecycleEvent := events.TextToSpeechCompletedEvent{
 		Header:     source.Header,
 		PageNumber: source.PageNumber,
 		TotalPages: source.TotalPages,
+		AudioKey:   audioKey,
 	}
 	data, _ := json.Marshal(lifecycleEvent)
 	_, _ = processor.jetStreamPublisher.Publish(ctx, subject, data)
