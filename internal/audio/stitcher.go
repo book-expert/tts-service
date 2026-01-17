@@ -101,20 +101,29 @@ func (audioStitcher *Stitcher) Stitch(requestContext context.Context, audioChunk
 
 	// 4. Execute FFmpeg Stitching in Shared Memory
 	outputFilePath := filepath.Join(workspaceDirectory, "stitched.wav")
-	
+
 	sampleRate := os.Getenv("AUDIO_SAMPLE_RATE_TTS")
 	if sampleRate == "" {
 		sampleRate = "44100"
 	}
-	
-	// We strictly use pcm_s24le for high-fidelity production standards.
+
+	bits := os.Getenv("AUDIO_BITS_PER_SAMPLE")
+	codec := "pcm_s16le" // Default to 16-bit as requested
+	switch bits {
+	case "24":
+		codec = "pcm_s24le"
+	case "32":
+		codec = "pcm_s32le"
+	}
+
+	// Execute stitching with dynamic codec
 	ffmpegCommand := exec.CommandContext(requestContext, "ffmpeg",
 		"-y",
 		"-f", "concat",
 		"-safe", "0",
 		"-i", concatListPath,
 		"-ar", sampleRate,
-		"-c:a", "pcm_s24le",
+		"-c:a", codec,
 		outputFilePath,
 	)
 
