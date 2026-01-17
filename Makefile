@@ -7,7 +7,7 @@ BINARY_PATH := ./$(SERVICE_NAME)
 .PHONY: build test test-cover test-race clean fmt vet lint run install help
 
 build:
-	go build -o $(BINARY_PATH) $(SERVICE_ENTRYPOINT)
+	go build -ldflags="-s -w" -o $(BINARY_PATH) $(SERVICE_ENTRYPOINT)
 
 test:
 	go test -v $(GO_PACKAGES)
