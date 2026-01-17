@@ -6,14 +6,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/book-expert/logger"
 	"github.com/book-expert/tts-service/internal/core"
 )
 
-// Processor implements core.TTSProcessor.
+// Processor implements core.TTSProcessor for high-fidelity audio generation.
 type Processor struct {
 	speechClient      *SpeechClient
 	audioStitcher     *Stitcher
@@ -21,129 +20,89 @@ type Processor struct {
 	speechConcurrency int
 }
 
-// NewProcessor creates a new TTS Processor with all required dependencies.
+// NewProcessor creates a new high-integrity TTS Processor.
 func NewProcessor(
 	speechClient *SpeechClient,
 	audioStitcher *Stitcher,
 	serviceLogger *logger.Logger,
-	concurrency int,
+	speechConcurrency int,
 ) *Processor {
-	if concurrency <= 0 {
-		concurrency = 1
+	if speechConcurrency <= 0 {
+		speechConcurrency = 1
 	}
 	return &Processor{
 		speechClient:      speechClient,
 		audioStitcher:     audioStitcher,
 		serviceLogger:     serviceLogger,
-		speechConcurrency: concurrency,
+		speechConcurrency: speechConcurrency,
 	}
 }
 
-// Process converts text to speech (48kHz WAV) using a safe stitching protocol.
-func (processor *Processor) Process(requestContext context.Context, text []byte, configuration core.TTSConfig) ([]byte, error) {
-	textString := string(text)
+// Process converts text to speech using a zero-disk in-memory pipeline for chunks.
+func (processor *Processor) Process(requestContext context.Context, textContent []byte, configuration core.TextToSpeechConfiguration) ([]byte, error) {
+	textString := string(textContent)
 	if textString == "" {
-		return nil, fmt.Errorf("empty text input")
+		return nil, fmt.Errorf("empty text input provided for generation")
 	}
 
-	processor.serviceLogger.Infof("Processor: Starting text processing. SessionIdentifier=%s, VoiceIdentifier=%s", configuration.SessionIdentifier, configuration.VoiceIdentifier)
+	processor.serviceLogger.Infof("Processor: Starting high-fidelity generation. Session=%s, Voice=%s", configuration.SessionIdentifier, configuration.VoiceIdentifier)
 
-	chunks := SplitText(textString)
-	if len(chunks) == 0 {
-		return nil, fmt.Errorf("no text chunks found after splitting")
+	textChunks := SplitText(textString)
+	if len(textChunks) == 0 {
+		return nil, fmt.Errorf("no text chunks identified after segmentation")
 	}
 
-	var chunkFiles []string
-	defer func() {
-		for _, file := range chunkFiles {
-			_ = os.Remove(file)
-		}
-	}()
+	// In-Memory Chunk Pipeline (Zero Disk)
+	var generatedAudioChunks [][]byte
 
-	for index, chunk := range chunks {
-		processor.serviceLogger.Infof("Processor: Generating chunk %d/%d (%d chars)", index+1, len(chunks), len(chunk.Text))
+	for index, chunk := range textChunks {
+		processor.serviceLogger.Infof("Processor: Generating chunk %d/%d (%d chars)", index+1, len(textChunks), len(chunk.Text))
 
 		startTime := time.Now()
 
-		stream, generationError := processor.speechClient.GenerateSpeech(requestContext, []string{chunk.Text}, configuration.VoiceIdentifier, "")
+		audioStream, generationError := processor.speechClient.GenerateSpeech(requestContext, []string{chunk.Text}, configuration.VoiceIdentifier, "")
 		if generationError != nil {
-			return nil, fmt.Errorf("chunk %d generation failed: %w", index, generationError)
+			return nil, fmt.Errorf("chunk %d generation failed at source: %w", index, generationError)
 		}
 
-		temporaryFile, creationError := os.CreateTemp("", fmt.Sprintf("chunk_%d_*.wav", index))
-		if creationError != nil {
-			_ = stream.Close()
-			return nil, fmt.Errorf("create temp file for chunk %d failed: %w", index, creationError)
+		chunkByteData, readError := io.ReadAll(audioStream)
+		_ = audioStream.Close()
+
+		if readError != nil {
+			return nil, fmt.Errorf("failed to read chunk %d stream: %w", index, readError)
 		}
 
-		bytesWritten, copyError := io.Copy(temporaryFile, stream)
-		_ = stream.Close()
-		_ = temporaryFile.Close()
-
-		if copyError != nil {
-			return nil, fmt.Errorf("write chunk %d failed: %w", index, copyError)
-		}
-
-		if bytesWritten == 0 {
-			processor.serviceLogger.Warnf("Chunk %d resulted in 0 bytes audio", index)
-			_ = os.Remove(temporaryFile.Name())
+		if len(chunkByteData) == 0 {
+			processor.serviceLogger.Warnf("Chunk %d resulted in empty audio payload", index)
 			continue
 		}
 
-		processor.serviceLogger.Infof("Chunk %d generated in %v (Size: %d bytes)", index+1, time.Since(startTime), bytesWritten)
-		chunkFiles = append(chunkFiles, temporaryFile.Name())
+		processor.serviceLogger.Infof("Chunk %d generated in %v (Payload: %d bytes)", index+1, time.Since(startTime), len(chunkByteData))
+		generatedAudioChunks = append(generatedAudioChunks, chunkByteData)
 	}
 
-	if len(chunkFiles) == 0 {
-		return nil, fmt.Errorf("no audio chunks were successfully generated")
+	if len(generatedAudioChunks) == 0 {
+		return nil, fmt.Errorf("zero valid audio chunks generated for page")
 	}
 
-	processor.serviceLogger.Infof("Processor: Stitching %d chunks into page content...", len(chunkFiles))
-	rawContentBytes, stitchError := processor.audioStitcher.Stitch(requestContext, chunkFiles)
+	processor.serviceLogger.Infof("Processor: Stitching %d chunks into page artifact using Shared Memory...", len(generatedAudioChunks))
+	
+	// Create Padding Chunks in Memory
+	sampleRateHz := 44100 // Production Standard for Generation
+	silenceDuration := 1 * time.Second
+	silencePaddingChunk := GenerateSilentWav(silenceDuration, sampleRateHz, 1, 32)
+
+	// Final Assembler Pipeline: [Silence] + [Chunks...] + [Silence]
+	var finalAssemblySequence [][]byte
+	finalAssemblySequence = append(finalAssemblySequence, silencePaddingChunk)
+	finalAssemblySequence = append(finalAssemblySequence, generatedAudioChunks...)
+	finalAssemblySequence = append(finalAssemblySequence, silencePaddingChunk)
+
+	finalPageArtifact, stitchError := processor.audioStitcher.Stitch(requestContext, finalAssemblySequence)
 	if stitchError != nil {
-		return nil, fmt.Errorf("stitch chunks failed: %w", stitchError)
+		return nil, fmt.Errorf("shared memory stitch operation failed: %w", stitchError)
 	}
 
-	rawContentPath, writeError := writeTempFile("raw_content_*.wav", rawContentBytes)
-	if writeError != nil {
-		return nil, fmt.Errorf("failed to write raw content: %w", writeError)
-	}
-	defer func() { _ = os.Remove(rawContentPath) }()
-
-	// Sandwich Strategy: [1s Silence] + [Content] + [1s Silence]
-	silenceWav := GenerateSilentWav(1*time.Second, 44100, 1, 32)
-	silencePath, silenceCreationError := writeTempFile("silence_pad_*.wav", silenceWav)
-	if silenceCreationError != nil {
-		return nil, fmt.Errorf("failed to create silence file: %w", silenceCreationError)
-	}
-	defer func() { _ = os.Remove(silencePath) }()
-
-	processor.serviceLogger.Infof("Processor: Applying 1s padding to start and end of page...")
-	finalBytes, finalStitchError := processor.audioStitcher.Stitch(requestContext, []string{silencePath, rawContentPath, silencePath})
-	if finalStitchError != nil {
-		return nil, fmt.Errorf("final stitch failed: %w", finalStitchError)
-	}
-
-	processor.serviceLogger.Infof("Processor: Successfully generated padded page audio (%d bytes)", len(finalBytes))
-	return finalBytes, nil
-}
-
-func writeTempFile(pattern string, data []byte) (string, error) {
-	temporaryFile, creationError := os.CreateTemp("", pattern)
-	if creationError != nil {
-		return "", fmt.Errorf("create temp file %s failed: %w", pattern, creationError)
-	}
-
-	if _, writeError := temporaryFile.Write(data); writeError != nil {
-		_ = temporaryFile.Close()
-		_ = os.Remove(temporaryFile.Name())
-		return "", fmt.Errorf("write to temp file %s failed: %w", pattern, writeError)
-	}
-
-	if closeError := temporaryFile.Close(); closeError != nil {
-		_ = os.Remove(temporaryFile.Name())
-		return "", fmt.Errorf("close temp file %s failed: %w", pattern, closeError)
-	}
-
-	return temporaryFile.Name(), nil
+	processor.serviceLogger.Infof("Processor: Successfully generated clean page artifact (%d bytes)", len(finalPageArtifact))
+	return finalPageArtifact, nil
 }

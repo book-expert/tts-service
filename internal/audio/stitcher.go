@@ -16,21 +16,25 @@ import (
 	"github.com/book-expert/logger"
 )
 
-// Stitcher handles the concatenation of audio chunks for a single page.
+const (
+	sharedMemoryWorkspace = "/dev/shm"
+)
+
+// Stitcher handles the high-fidelity concatenation of audio chunks using Shared Memory.
 type Stitcher struct {
 	serviceLogger *logger.Logger
 }
 
-// NewStitcher initializes a new audio Stitcher.
+// NewStitcher initializes a new high-integrity audio Stitcher.
 func NewStitcher(serviceLogger *logger.Logger) *Stitcher {
 	return &Stitcher{serviceLogger: serviceLogger}
 }
 
-// GenerateSilentWav creates a silent WAV file byte slice.
+// GenerateSilentWav creates a high-fidelity silent WAV artifact in-memory.
 func GenerateSilentWav(duration time.Duration, sampleRate, channels, bitsPerSample int) []byte {
 	var buffer bytes.Buffer
-	numSamples := int(duration.Seconds() * float64(sampleRate))
-	dataSize := numSamples * channels * (bitsPerSample / 8)
+	numberSamples := int(duration.Seconds() * float64(sampleRate))
+	dataSize := numberSamples * channels * (bitsPerSample / 8)
 	fileSize := 36 + dataSize
 
 	buffer.WriteString("RIFF")
@@ -59,59 +63,65 @@ func GenerateSilentWav(duration time.Duration, sampleRate, channels, bitsPerSamp
 	return buffer.Bytes()
 }
 
-// Stitch combines multiple audio files into a single WAV byte slice using FFmpeg.
-func (stitcher *Stitcher) Stitch(requestContext context.Context, inputPaths []string) ([]byte, error) {
-	if len(inputPaths) == 0 {
-		return nil, fmt.Errorf("no inputs to stitch")
+// Stitch combines multiple audio byte slices into a single WAV artifact using /dev/shm for FFmpeg interop.
+func (audioStitcher *Stitcher) Stitch(requestContext context.Context, audioChunks [][]byte) ([]byte, error) {
+	if len(audioChunks) == 0 {
+		return nil, fmt.Errorf("no audio chunks provided for stitching")
 	}
 
-	listFile, creationError := os.CreateTemp("", "stitch_list_*.txt")
-	if creationError != nil {
-		return nil, fmt.Errorf("failed to create stitch list: %w", creationError)
+	// 1. Prepare Workspace in Shared Memory
+	timestampIdentifier := time.Now().UnixNano()
+	workspaceDirectory := filepath.Join(sharedMemoryWorkspace, fmt.Sprintf("stitch_%d", timestampIdentifier))
+	if makeDirectoryError := os.MkdirAll(workspaceDirectory, 0755); makeDirectoryError != nil {
+		return nil, fmt.Errorf("failed to create shared memory workspace: %w", makeDirectoryError)
 	}
-	defer func() { _ = os.Remove(listFile.Name()) }()
+	defer func() { _ = os.RemoveAll(workspaceDirectory) }()
 
-	var listContent strings.Builder
-	for _, path := range inputPaths {
+	// 2. Write Chunks to Shared Memory
+	var chunkPaths []string
+	for index, chunkData := range audioChunks {
+		chunkPath := filepath.Join(workspaceDirectory, fmt.Sprintf("chunk_%d.wav", index))
+		if writeError := os.WriteFile(chunkPath, chunkData, 0644); writeError != nil {
+			return nil, fmt.Errorf("failed to write chunk %d to shared memory: %w", index, writeError)
+		}
+		chunkPaths = append(chunkPaths, chunkPath)
+	}
+
+	// 3. Generate FFmpeg Concat List in Shared Memory
+	concatListPath := filepath.Join(workspaceDirectory, "chunks.txt")
+	var concatListContent strings.Builder
+	for _, path := range chunkPaths {
+		// Escape single quotes for FFmpeg concat format
 		safePath := strings.ReplaceAll(path, "'", "'\\''")
-		listContent.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+		concatListContent.WriteString(fmt.Sprintf("file '%s'\n", safePath))
 	}
-	if _, writeError := listFile.WriteString(listContent.String()); writeError != nil {
-		return nil, fmt.Errorf("failed to write stitch list: %w", writeError)
+	if writeListError := os.WriteFile(concatListPath, []byte(concatListContent.String()), 0644); writeListError != nil {
+		return nil, fmt.Errorf("failed to write concat list to shared memory: %w", writeListError)
 	}
-	_ = listFile.Close()
 
-	outputFile := filepath.Join(os.TempDir(), fmt.Sprintf("stitched_%d.wav", time.Now().UnixNano()))
-	defer func() { _ = os.Remove(outputFile) }()
-
-	// We use the concat filter instead of '-c copy' to ensure stream consistency
-	// and avoid header mismatches that cause the 'helium effect'.
+	// 4. Execute FFmpeg Stitching in Shared Memory
+	outputFilePath := filepath.Join(workspaceDirectory, "stitched.wav")
+	
 	sampleRate := os.Getenv("AUDIO_SAMPLE_RATE_TTS")
 	if sampleRate == "" {
 		sampleRate = "44100"
 	}
-	bits := os.Getenv("AUDIO_BITS_PER_SAMPLE")
-	codec := "pcm_s24le"
-	switch bits {
-	case "32":
-		codec = "pcm_s32le"
-	case "16":
-		codec = "pcm_s16le"
-	}
-
-	command := exec.CommandContext(requestContext, "ffmpeg",
+	
+	// We strictly use pcm_s24le for high-fidelity production standards.
+	ffmpegCommand := exec.CommandContext(requestContext, "ffmpeg",
 		"-y",
 		"-f", "concat",
 		"-safe", "0",
-		"-i", listFile.Name(),
+		"-i", concatListPath,
 		"-ar", sampleRate,
-		"-c:a", codec,
-		outputFile,
+		"-c:a", "pcm_s24le",
+		outputFilePath,
 	)
 
-	if output, executionError := command.CombinedOutput(); executionError != nil {
-		return nil, fmt.Errorf("ffmpeg stitch failed: %w | Output: %s", executionError, string(output))
+	if terminalOutput, executionError := ffmpegCommand.CombinedOutput(); executionError != nil {
+		return nil, fmt.Errorf("ffmpeg shared memory stitch failed: %w | Output: %s", executionError, string(terminalOutput))
 	}
 
-	return os.ReadFile(outputFile)
+	// 5. Read Final Artifact from Shared Memory
+	return os.ReadFile(outputFilePath)
 }

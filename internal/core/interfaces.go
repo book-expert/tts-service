@@ -5,17 +5,19 @@ package core
 
 import "context"
 
+// ObjectStore defines the high-integrity storage interface for artifacts.
 type ObjectStore interface {
-	Download(requestContext context.Context, key string) ([]byte, error)
-	Upload(requestContext context.Context, key string, data []byte) error
+	Download(requestContext context.Context, objectKey string) ([]byte, error)
+	Upload(requestContext context.Context, objectKey string, byteData []byte) error
 }
 
+// TTSProcessor defines the high-fidelity conversion interface for text-to-speech.
 type TTSProcessor interface {
-	Process(requestContext context.Context, text []byte, configuration TTSConfig) ([]byte, error)
+	Process(requestContext context.Context, textContent []byte, configuration TextToSpeechConfiguration) ([]byte, error)
 }
 
-// TTSConfig holds parameters for a single TTS processing request.
-type TTSConfig struct {
+// TextToSpeechConfiguration holds parameters for a single high-fidelity generation request.
+type TextToSpeechConfiguration struct {
 	SessionIdentifier string
 	VoiceIdentifier   string
 	VoiceStyle        string

@@ -182,9 +182,9 @@ func (processor *Processor) executeJob(requestContext context.Context, event *ev
 		return "", retrievalError
 	}
 
-	var textToSpeechConfiguration core.TTSConfig
+	var textToSpeechConfiguration core.TextToSpeechConfiguration
 	if event.Settings != nil && event.Settings.AudioSessionConfig != nil {
-		textToSpeechConfiguration = core.TTSConfig{
+		textToSpeechConfiguration = core.TextToSpeechConfiguration{
 			SessionIdentifier: event.Settings.AudioSessionConfig.SessionIdentifier,
 			VoiceIdentifier:   event.Settings.AudioSessionConfig.VoiceIdentifier,
 			VoiceStyle:        event.Settings.AudioSessionConfig.VoiceStyle,
