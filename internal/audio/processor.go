@@ -111,7 +111,7 @@ func (processor *Processor) Process(requestContext context.Context, text []byte,
 	defer func() { _ = os.Remove(rawContentPath) }()
 
 	// Sandwich Strategy: [1s Silence] + [Content] + [1s Silence]
-	silenceWav := GenerateSilentWav(1*time.Second, 48000, 1, 32)
+	silenceWav := GenerateSilentWav(1*time.Second, 44100, 1, 32)
 	silencePath, silenceCreationError := writeTempFile("silence_pad_*.wav", silenceWav)
 	if silenceCreationError != nil {
 		return nil, fmt.Errorf("failed to create silence file: %w", silenceCreationError)

@@ -84,12 +84,15 @@ func (stitcher *Stitcher) Stitch(requestContext context.Context, inputPaths []st
 	outputFile := filepath.Join(os.TempDir(), fmt.Sprintf("stitched_%d.wav", time.Now().UnixNano()))
 	defer func() { _ = os.Remove(outputFile) }()
 
+	// We use the concat filter instead of '-c copy' to ensure stream consistency
+	// and avoid header mismatches that cause the 'helium effect'.
 	command := exec.CommandContext(requestContext, "ffmpeg",
 		"-y",
 		"-f", "concat",
 		"-safe", "0",
 		"-i", listFile.Name(),
-		"-c", "copy",
+		"-ar", "44100",
+		"-c:a", "pcm_s24le",
 		outputFile,
 	)
 
