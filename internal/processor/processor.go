@@ -228,23 +228,42 @@ func (processor *Processor) retrieveAndCleanText(requestContext context.Context,
 		return nil, fmt.Errorf("download text failed: %w", downloadError)
 	}
 
-	var textSegments []string
-	if jsonError := json.Unmarshal(textContent, &textSegments); jsonError != nil {
-		return nil, fmt.Errorf("failed to unmarshal text segments (contract violation): %w", jsonError)
-	}
-
-	joinedText := strings.Join(textSegments, "\n\n")
-	return []byte(joinedText), nil
+	return textContent, nil
 }
 
 func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *events.TextCreatedEvent, audioKey, subject string) {
-	lifecycleEvent := events.TextToSpeechCompletedEvent{
-		Header:     source.Header,
-		PageNumber: source.PageNumber,
-		TotalPages: source.TotalPages,
-		AudioKey:   audioKey,
+	var data []byte
+
+	switch subject {
+	case events.SubjectTextToSpeechInitialized:
+		event := events.TextToSpeechInitializedEvent{Header: source.Header}
+		data, _ = json.Marshal(event)
+	case events.SubjectTextToSpeechReady:
+		event := events.TextToSpeechReadyEvent{Header: source.Header}
+		data, _ = json.Marshal(event)
+	case events.SubjectTextToSpeechCreated:
+		event := events.TextToSpeechCreatedEvent{
+			Header:     source.Header,
+			PageNumber: source.PageNumber,
+			TotalPages: source.TotalPages,
+		}
+		data, _ = json.Marshal(event)
+	case events.SubjectTextToSpeechCompleted:
+		event := events.TextToSpeechCompletedEvent{
+			Header:     source.Header,
+			PageNumber: source.PageNumber,
+			TotalPages: source.TotalPages,
+			AudioKey:   audioKey,
+		}
+		data, _ = json.Marshal(event)
+	default:
+		// Fallback to minimal container
+		container := struct {
+			Header events.EventHeader `json:"Header"`
+		}{Header: source.Header}
+		data, _ = json.Marshal(container)
 	}
-	data, _ := json.Marshal(lifecycleEvent)
+
 	_, _ = processor.jetStreamPublisher.Publish(ctx, subject, data)
 }
 
