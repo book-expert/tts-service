@@ -89,7 +89,7 @@ func newApplication(systemContext context.Context, serviceConfiguration *config.
 		jetStreamContext,
 		jetStreamContext,
 		events.StreamTextFiles,
-		events.SubjectTextCompleted,
+		events.SubjectTextCreated,
 		serviceConfiguration.NATS.Consumer.DurableName,
 		events.SubjectTextToSpeechCompleted,
 		events.SubjectTextToSpeechStarted,
