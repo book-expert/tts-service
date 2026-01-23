@@ -107,12 +107,8 @@ func (audioStitcher *Stitcher) Stitch(requestContext context.Context, audioChunk
 		sampleRate = "44100"
 	}
 
-	bits := os.Getenv("AUDIO_BITS_PER_SAMPLE")
-	codec := "pcm_s16le" // Default to 16-bit as requested
-	switch bits {
-	case "24":
-		codec = "pcm_s24le"
-	case "32":
+	codec := os.Getenv("AUDIO_FFMPEG_CODEC")
+	if codec == "" {
 		codec = "pcm_s32le"
 	}
 
