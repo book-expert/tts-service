@@ -3,8 +3,8 @@ module github.com/book-expert/tts-service
 go 1.25.5
 
 require (
-	github.com/book-expert/common-events v0.0.9
-	github.com/book-expert/common-worker v0.0.7
+	github.com/book-expert/common-events v0.1.3
+	github.com/book-expert/common-worker v0.0.8
 	github.com/book-expert/logger v0.1.4
 	github.com/nats-io/nats.go v1.46.1
 )
